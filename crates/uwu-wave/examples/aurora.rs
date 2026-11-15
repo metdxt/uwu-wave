@@ -42,7 +42,7 @@ fn main() {
     let fl = seat("flute", Orchestra::flute(), "flute", -6.db()).gain(6.db());
     let ob = seat("oboe", Orchestra::oboe(), "oboe", -6.db()).gain(9.db());
     let cl = seat("clarinet", Orchestra::clarinet(), "clarinet", -6.db()).gain(12.db());
-    let bn = seat("bassoon", Orchestra::bassoon(), "bassoon", -7.db()).gain(8.db());
+    let bn = seat("bassoon", Orchestra::bassoon(), "bassoon", -9.db()).gain(1.db());
     let hn = seat("horns", Orchestra::horns(), "horns", -5.db()).gain(4.db());
     let tpt = seat("trumpet", Orchestra::trumpet(), "trumpet", -6.db()).gain(4.db());
     let tbn = seat("trombones", Orchestra::trombones(), "trombone", -6.db()).gain(4.db());
@@ -50,7 +50,7 @@ fn main() {
     let timp = seat("timpani", Orchestra::timpani(), "timpani", -6.db());
     let cym = seat("cymbals", Orchestra::cymbals(), "percussion", -4.db()).gain(6.db());
     let harp = seat("harp", Orchestra::harp(), "harp", -5.db()).gain((-4).db());
-    let cel = seat("celesta", Orchestra::celesta(), "celesta", -4.db());
+    let cel = seat("celesta", Orchestra::celesta(), "celesta", -4.db()).gain((-4).db());
     let choir = seat("choir", Orchestra::choir(), "choir", -4.db());
 
     // ───────────────────────── material ─────────────────────────
@@ -111,8 +111,8 @@ fn main() {
             s.dynamics(t, Dyn::P);
         }
         s.dynamics(&cb, Dyn::MF);
-        s.play(&bn, &countermelody);
-        s.dynamics(&bn, Dyn::MP);
+        s.play(&bn, &countermelody); // background countermelody: stays under the oboe
+        s.dynamics(&bn, Dyn::P);
         s.play(&harp, &harp_arp);
         s.play(&cel, &bells);
         s.play(&timp, &timp_rolls);
