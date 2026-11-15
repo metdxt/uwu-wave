@@ -253,6 +253,7 @@ mod tests {
                     id: i as u64,
                     pitch: *k,
                     vel: 0.8,
+                    artic: Default::default(),
                     dur: 1.0,
                 },
                 &ctx,

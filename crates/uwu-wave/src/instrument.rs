@@ -17,6 +17,15 @@ pub struct NoteOn {
     pub vel: f32,
     /// Nominal duration in seconds (handy for one-shots / plucks; note-off still arrives).
     pub dur: f32,
+    /// Articulation requested by the score.
+    pub artic: crate::clip::Artic,
+}
+
+impl NoteOn {
+    /// A note-on with default articulation (handy in tests).
+    pub fn new(id: u64, pitch: f32, vel: f32, dur: f32) -> NoteOn {
+        NoteOn { id, pitch, vel, dur, artic: crate::clip::Artic::Normal }
+    }
 }
 
 /// The instrument interface. Implementations **add** into `out` (it may already contain audio).

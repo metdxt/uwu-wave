@@ -460,6 +460,7 @@ impl Seq for Pattern {
                 dur: e.dur * bpc,
                 pitch: e.pitch,
                 vel: e.vel.clamp(0.0, 1.0),
+                artic: Default::default(),
             })
             .collect()
     }

@@ -3,6 +3,68 @@
 use crate::time::Time;
 use std::sync::Arc;
 
+/// How a note is played. Instruments that don't care treat everything as `Normal`;
+/// orchestral instruments pick the matching sample set (and fall back gracefully).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Artic {
+    #[default]
+    Normal,
+    /// Slurred into the next note (no re-attack; legato transition).
+    Legato,
+    /// Long sustained note.
+    Sustain,
+    /// Short, detached.
+    Staccato,
+    /// Very short.
+    Staccatissimo,
+    /// Bounced bow (strings) – short and light.
+    Spiccato,
+    /// Plucked (strings).
+    Pizzicato,
+    /// Fast repeated bowing / tonguing.
+    Tremolo,
+    /// Strong attack.
+    Accent,
+    /// Very strong, separated attack.
+    Marcato,
+    /// Full length, slight weight.
+    Tenuto,
+    Trill,
+    Harmonic,
+    /// Muted (con sordino / stopped / cup mute).
+    Muted,
+    /// Instrument-specific extra articulation.
+    Custom(u8),
+}
+
+impl Artic {
+    /// Parse a short name: `leg`, `sus`, `stacc`, `staccatissimo`, `spicc`, `pizz`, `trem`, `acc`,
+    /// `marc`, `ten`, `trill`, `harm`, `mute`/`sord`, `norm`.
+    pub fn parse(s: &str) -> Option<Artic> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "" | "norm" | "normal" | "ord" => Artic::Normal,
+            "leg" | "legato" | "slur" => Artic::Legato,
+            "sus" | "sustain" | "long" => Artic::Sustain,
+            "st" | "stc" | "stac" | "stacc" | "staccato" => Artic::Staccato,
+            "stacciss" | "staccatissimo" => Artic::Staccatissimo,
+            "sp" | "spic" | "spicc" | "spiccato" => Artic::Spiccato,
+            "pz" | "pizz" | "pizzicato" => Artic::Pizzicato,
+            "tr" | "trem" | "tremolo" => Artic::Tremolo,
+            "acc" | "accent" => Artic::Accent,
+            "marc" | "marcato" => Artic::Marcato,
+            "ten" | "tenuto" => Artic::Tenuto,
+            "trill" => Artic::Trill,
+            "harm" | "harmonic" => Artic::Harmonic,
+            "mute" | "muted" | "sord" | "con-sord" => Artic::Muted,
+            _ => return None,
+        })
+    }
+    /// Short articulations (played as one-shots regardless of note length).
+    pub fn is_short(self) -> bool {
+        matches!(self, Artic::Staccato | Artic::Staccatissimo | Artic::Spiccato | Artic::Pizzicato)
+    }
+}
+
 /// A note on a clip-local timeline (beats). `pitch` is a (fractional) MIDI note number;
 /// drum kits map pitches to sounds (GM layout: 36 kick, 38 snare, 42 closed hat...).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -12,11 +74,18 @@ pub struct Note {
     pub pitch: f32,
     /// Velocity 0..1.
     pub vel: f32,
+    /// Articulation.
+    pub artic: Artic,
 }
 
 impl Note {
     pub fn new(start: impl Into<Time>, dur: impl Into<Time>, pitch: f32, vel: f32) -> Note {
-        Note { start: start.into().0, dur: dur.into().0, pitch, vel }
+        Note { start: start.into().0, dur: dur.into().0, pitch, vel, artic: Artic::Normal }
+    }
+    /// Same note with another articulation.
+    pub fn artic(mut self, a: Artic) -> Note {
+        self.artic = a;
+        self
     }
     pub fn end(&self) -> f64 {
         self.start + self.dur

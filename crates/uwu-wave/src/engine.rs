@@ -41,7 +41,7 @@ pub struct RenderOptions {
 #[derive(Clone, Copy, Debug)]
 enum EvKind {
     Off(u64),
-    On { id: u64, pitch: f32, vel: f32, dur: f64 },
+    On { id: u64, pitch: f32, vel: f32, dur: f64, artic: crate::clip::Artic },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -97,7 +97,8 @@ struct Chan {
     gain: Param,
     pan: Param,
     bend: Param,
-    modwheel: Param,
+    ccs: Vec<(u8, Param)>,
+    ccvals: [f32; 128],
     gl: Ramp,
     gr: Ramp,
     out: Option<usize>,
@@ -295,7 +296,7 @@ impl Engine {
             for nt in &all_notes[i] {
                 let id = next_id;
                 next_id += 1;
-                evs.push(Ev { beat: nt.start, kind: EvKind::On { id, pitch: nt.pitch, vel: nt.vel, dur: nt.dur } });
+                evs.push(Ev { beat: nt.start, kind: EvKind::On { id, pitch: nt.pitch, vel: nt.vel, dur: nt.dur, artic: nt.artic } });
                 evs.push(Ev { beat: nt.start + nt.dur, kind: EvKind::Off(id) });
             }
             evs.sort_by(|a, b| {
@@ -347,7 +348,8 @@ impl Engine {
                 gain: c.gain.clone(),
                 pan: c.pan.clone(),
                 bend: c.bend.clone(),
-                modwheel: c.modwheel.clone(),
+                ccs: c.ccs.clone(),
+                ccvals: crate::ctx::DEFAULT_CC,
                 gl: Ramp::default(),
                 gr: Ramp::default(),
                 out: if c.kind == ChanKind::Master { None } else { Some(c.output.unwrap_or(0)) },
@@ -585,7 +587,7 @@ impl Engine {
         let sr = self.sr as f32;
         let bps = bpm / 60.0 / sr as f64;
         let beat_end = self.beat + n as f64 * bps;
-        let base = Ctx { sr, clock, bpm, frame: self.frame, sidechain: None, sidechains: &[], bend: 0.0, modwheel: 0.0 };
+        let base = Ctx { sr, clock, bpm, frame: self.frame, sidechain: None, sidechains: &[], cc: &crate::ctx::DEFAULT_CC, bend: 0.0, modwheel: 0.0 };
         let over = self.beat >= self.end_beat;
 
         if over && !self.flushed {
@@ -607,7 +609,11 @@ impl Engine {
         for &ci in order.iter() {
             let mut buf = std::mem::take(&mut inputs[ci]);
             let c = &mut chans[ci];
-            let base = Ctx { bend: c.bend.at(clock), modwheel: c.modwheel.at(clock), ..base };
+            for (k, p) in &c.ccs {
+                c.ccvals[*k as usize] = p.at(clock);
+            }
+            let ccv = c.ccvals;
+            let base = Ctx { bend: c.bend.at(clock), modwheel: ccv[1], cc: &ccv, ..base };
             // ---- instrument + events (sample accurate)
             if let Some(inst) = c.inst.as_mut() {
                 let mut pos = 0usize;
@@ -625,9 +631,9 @@ impl Engine {
                     let Some(e) = next else { break };
                     let cx = base.advanced(pos);
                     match e.kind {
-                        EvKind::On { id, pitch, vel, dur } => {
+                        EvKind::On { id, pitch, vel, dur, artic } => {
                             if e.beat < self.end_beat {
-                                let note = NoteOn { id, pitch, vel, dur: (dur * 60.0 / bpm) as f32 };
+                                let note = NoteOn { id, pitch, vel, dur: (dur * 60.0 / bpm) as f32, artic };
                                 inst.note_on(&note, &cx);
                             }
                         }

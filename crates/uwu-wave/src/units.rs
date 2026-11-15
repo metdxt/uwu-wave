@@ -101,3 +101,49 @@ pub trait Units: Copy {
 }
 macro_rules! impl_units { ($($t:ty),*) => { $(impl Units for $t { #[inline] fn as_f64(self) -> f64 { self as f64 } })* } }
 impl_units!(f32, f64, i32, i64, u32, u64, usize);
+
+/// Dynamic markings as 0..1 levels, for velocities, CC1 dynamics and hairpins:
+/// `s.dynamics(&strings, Dyn::P)`, `s.cresc(&strings, Dyn::P, Dyn::FF)`, `.vel(Dyn::MF)`.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct Dyn(pub f32);
+
+impl Dyn {
+    pub const PPP: Dyn = Dyn(0.1);
+    pub const PP: Dyn = Dyn(0.2);
+    pub const P: Dyn = Dyn(0.35);
+    pub const MP: Dyn = Dyn(0.5);
+    pub const MF: Dyn = Dyn(0.65);
+    pub const F: Dyn = Dyn(0.8);
+    pub const FF: Dyn = Dyn(0.92);
+    pub const FFF: Dyn = Dyn(1.0);
+    /// Parse `ppp pp p mp mf f ff fff`.
+    pub fn parse(s: &str) -> Option<Dyn> {
+        Some(match s {
+            "ppp" => Dyn::PPP,
+            "pp" => Dyn::PP,
+            "p" => Dyn::P,
+            "mp" => Dyn::MP,
+            "mf" => Dyn::MF,
+            "f" => Dyn::F,
+            "ff" => Dyn::FF,
+            "fff" => Dyn::FFF,
+            _ => return None,
+        })
+    }
+}
+impl Val for Dyn {
+    fn val(self) -> f32 {
+        self.0
+    }
+}
+impl From<Dyn> for f32 {
+    fn from(d: Dyn) -> f32 {
+        d.0
+    }
+}
+impl From<Dyn> for crate::param::Param {
+    fn from(d: Dyn) -> crate::param::Param {
+        crate::param::Param::Const(d.0)
+    }
+}
+

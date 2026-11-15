@@ -26,15 +26,59 @@ pub struct Ctx<'a> {
     /// Track pitch bend in semitones (from [`Track::bend`](crate::song::Track::bend)); instruments
     /// add it to every sounding note's pitch.
     pub bend: f32,
+    /// All 128 MIDI-style continuous controllers of the track, 0..1 (see [`Track::cc`](crate::song::Track::cc)).
+    /// Defaults: everything 0 except CC7 (volume) and CC11 (expression), which are 1.
+    pub cc: &'a [f32; 128],
     /// Track mod wheel 0..1 (from [`Track::modwheel`](crate::song::Track::modwheel)); instruments
     /// map it to something expressive (vibrato depth, brightness...).
     pub modwheel: f32,
 }
 
+/// Default controller values (CC7 and CC11 at full, everything else 0).
+pub static DEFAULT_CC: [f32; 128] = {
+    let mut a = [0.0f32; 128];
+    a[7] = 1.0;
+    a[11] = 1.0;
+    a
+};
+
+/// Well-known controller numbers.
+pub mod cc {
+    /// Mod wheel – orchestral instruments use it as **dynamics** (layer crossfade).
+    pub const MOD: u8 = 1;
+    pub const DYNAMICS: u8 = 1;
+    pub const BREATH: u8 = 2;
+    pub const VOLUME: u8 = 7;
+    pub const PAN: u8 = 10;
+    /// Expression: fine loudness (swells, hairpins) inside a dynamic.
+    pub const EXPRESSION: u8 = 11;
+    /// Vibrato depth (orchestral instruments).
+    pub const VIBRATO: u8 = 21;
+    pub const SUSTAIN: u8 = 64;
+    /// Legato on/off (≥ 0.5 = on) for instruments with a legato engine.
+    pub const LEGATO: u8 = 68;
+    pub const BRIGHTNESS: u8 = 74;
+}
+
 impl<'a> Ctx<'a> {
+    /// Controller value 0..1.
+    #[inline]
+    pub fn cc(&self, n: u8) -> f32 {
+        self.cc[(n & 127) as usize]
+    }
+    /// CC11 expression 0..1 (1 = full).
+    #[inline]
+    pub fn expression(&self) -> f32 {
+        self.cc[11]
+    }
+    /// CC1 dynamics 0..1 (same as `modwheel`).
+    #[inline]
+    pub fn dynamics(&self) -> f32 {
+        self.modwheel
+    }
     /// A context for tests/offline use.
     pub fn offline(sr: f32) -> Ctx<'static> {
-        Ctx { sr, clock: Clock::default(), bpm: 120.0, frame: 0, sidechain: None, sidechains: &[], bend: 0.0, modwheel: 0.0 }
+        Ctx { sr, clock: Clock::default(), bpm: 120.0, frame: 0, sidechain: None, sidechains: &[], cc: &DEFAULT_CC, bend: 0.0, modwheel: 0.0 }
     }
     /// The sidechain buffer coming from the track/bus called `name`, if this insert requested it.
     pub fn sidechain_from(&self, name: &str) -> Option<&'a [Frame]> {

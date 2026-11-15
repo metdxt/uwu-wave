@@ -64,7 +64,8 @@ pub(crate) struct ChanData {
     pub transpose: f32,
     pub vel: f32,
     pub bend: Param,
-    pub modwheel: Param,
+    /// Controller lanes (CC1 = mod wheel / dynamics lives here too).
+    pub ccs: Vec<(u8, Param)>,
 }
 
 /// A named region of the arrangement.
@@ -307,7 +308,7 @@ impl ChanData {
             transpose: 0.0,
             vel: 1.0,
             bend: Param::Const(0.0),
-            modwheel: Param::Const(0.0),
+            ccs: vec![],
         }
     }
 }
@@ -379,18 +380,63 @@ impl Track {
         let p = st.into();
         self.with(|c| c.bend = p)
     }
-    /// Mod wheel 0..1 (automatable). Synths map it to vibrato depth / brightness.
+    /// Mod wheel 0..1 (CC1, automatable). Synths map it to vibrato depth / brightness;
+    /// orchestral instruments use it as dynamics (see [`Track::dynamics`]).
     pub fn modwheel(&self, m: impl Into<Param>) -> Track {
-        let p = m.into();
-        self.with(|c| c.modwheel = p)
+        self.cc(1, m)
+    }
+    /// Orchestral dynamics 0..1 (CC1): crossfades pp → ff sample layers and timbre.
+    /// `.dynamics(Dyn::MP)`, `.dynamics(auto![0 => Dyn::P, bar(4) => Dyn::FF])`.
+    pub fn dynamics(&self, d: impl Into<Param>) -> Track {
+        self.cc(1, d)
+    }
+    /// Expression 0..1 (CC11): loudness swells within a dynamic (default 1).
+    pub fn expression(&self, e: impl Into<Param>) -> Track {
+        self.cc(11, e)
+    }
+    /// Set any controller lane (0..127, values 0..1); replaces a previous lane for that CC.
+    pub fn cc(&self, n: u8, v: impl Into<Param>) -> Track {
+        let (n, p) = (n & 127, v.into());
+        self.with(|c| {
+            c.ccs.retain(|(k, _)| *k != n);
+            c.ccs.push((n, p));
+        })
+    }
+    /// The automation lane behind controller `n`, created on first use (starting at the CC's
+    /// default) — sections write into it with `s.cresc`, `s.dynamics`, `s.ramp`...
+    pub fn cc_lane(&self, n: u8) -> Lane {
+        let n = n & 127;
+        let existing = self.song.borrow().chans[self.idx].ccs.iter().find(|(k, _)| *k == n).map(|(_, p)| p.clone());
+        match existing {
+            Some(Param::Lane(l)) => l,
+            Some(other) => {
+                // turn the existing param into a lane seeded from its value at 0
+                let l = Lane::new(other.at_beat(0.0));
+                self.cc(n, &l);
+                l
+            }
+            None => {
+                let l = Lane::new(crate::ctx::DEFAULT_CC[n as usize]);
+                self.cc(n, &l);
+                l
+            }
+        }
+    }
+    /// The controller param for `n`, if set.
+    pub fn cc_param(&self, n: u8) -> Option<Param> {
+        self.song.borrow().chans[self.idx].ccs.iter().find(|(k, _)| *k == n & 127).map(|(_, p)| p.clone())
+    }
+    /// All controller lanes set on this track.
+    pub fn cc_params(&self) -> Vec<(u8, Param)> {
+        self.song.borrow().chans[self.idx].ccs.clone()
     }
     /// The track's pitch-bend param (semitones).
     pub fn bend_param(&self) -> Param {
         self.song.borrow().chans[self.idx].bend.clone()
     }
-    /// The track's mod-wheel param.
+    /// The track's mod-wheel (CC1) param.
     pub fn modwheel_param(&self) -> Param {
-        self.song.borrow().chans[self.idx].modwheel.clone()
+        self.cc_param(1).unwrap_or(Param::Const(0.0))
     }
     /// Route this channel's output into a bus (instead of master).
     pub fn to(&self, bus: &Track) -> Track {
@@ -442,6 +488,7 @@ impl Track {
                     dur: (s + nt.dur).min(stop) - s,
                     pitch: nt.pitch + c.transpose,
                     vel: (nt.vel * c.vel).clamp(0.0, 1.0),
+                    artic: nt.artic,
                 });
             }
         }
@@ -527,6 +574,30 @@ impl Section {
     /// Set a lane value at a section-relative offset.
     pub fn set_at(&mut self, offset: impl Into<Time>, lane: &Lane, v: impl Val) -> &mut Self {
         lane.set(self.abs(offset), v);
+        self
+    }
+    /// Set a track's dynamics (CC1) from the section start: `s.dynamics(&strings, Dyn::P)`.
+    pub fn dynamics(&mut self, track: &Track, d: impl Val) -> &mut Self {
+        track.cc_lane(1).set(self.start, d);
+        self
+    }
+    /// Crescendo / diminuendo of a track's dynamics (CC1) over the whole section.
+    pub fn cresc(&mut self, track: &Track, from: impl Val, to: impl Val) -> &mut Self {
+        track.cc_lane(1).ramp(self.start, self.end(), from, to, Curve::Smooth);
+        self
+    }
+    /// Alias of [`Section::cresc`] (reads better when `to < from`).
+    pub fn dim(&mut self, track: &Track, from: impl Val, to: impl Val) -> &mut Self {
+        self.cresc(track, from, to)
+    }
+    /// Hairpin over a section-relative range: `s.hairpin(&vln, 2.bars()..4.bars(), Dyn::P, Dyn::F)`.
+    pub fn hairpin(&mut self, track: &Track, range: std::ops::Range<Time>, from: impl Val, to: impl Val) -> &mut Self {
+        track.cc_lane(1).ramp(self.abs(range.start), self.abs(range.end), from, to, Curve::Smooth);
+        self
+    }
+    /// Write any controller lane over the section (linear).
+    pub fn cc_ramp(&mut self, track: &Track, n: u8, from: impl Val, to: impl Val) -> &mut Self {
+        track.cc_lane(n).ramp(self.start, self.end(), from, to, Curve::Linear);
         self
     }
     /// Add a marker at a section-relative offset.

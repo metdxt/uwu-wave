@@ -138,6 +138,7 @@ pub(crate) mod test_util {
                             id: i as u64 + 1,
                             pitch: n.1,
                             vel: n.2,
+                            artic: Default::default(),
                             dur: n.3,
                         },
                         &ctx,

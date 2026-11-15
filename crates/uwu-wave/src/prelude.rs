@@ -1,7 +1,8 @@
 //! `use uwu_wave::prelude::*;` — everything you need to write a song.
 
 pub use crate::auto;
-pub use crate::clip::{rest, Clip, IntoSeq, Note, Seq};
+pub use crate::clip::{rest, Artic, Clip, IntoSeq, Note, Seq};
+pub use crate::ctx::cc;
 pub use crate::ctx::Ctx;
 pub use crate::dsp::Frame;
 pub use crate::engine::{Render, RenderOptions, Report};
@@ -9,7 +10,7 @@ pub use crate::instrument::{Instrument, Layer, NoteOn, Poly, PolyMode, Silence, 
 pub use crate::param::{lfo, Automation, Clock, Curve, Lane, Lfo, Param, Shape};
 pub use crate::song::{Section, Song, Track};
 pub use crate::time::{bar, bars, beat, dotted, eighth, half, note, quarter, sixteenth, thirty_second, triplet, whole, Span, Time};
-pub use crate::units::{Db, Units, Val};
+pub use crate::units::{Db, Dyn, Units, Val};
 
 #[allow(unused_imports)]
 pub use crate::fx::prelude::*;

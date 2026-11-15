@@ -655,6 +655,7 @@ mod tests {
                 id: 1,
                 pitch: 57.0,
                 vel: 1.0,
+                artic: Default::default(),
                 dur: 1.0,
             },
             &ctx,
