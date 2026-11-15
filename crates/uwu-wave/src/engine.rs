@@ -10,7 +10,7 @@ use crate::fx::Effect;
 use crate::instrument::{Instrument, NoteOn};
 use crate::param::{Clock, Param};
 use crate::song::{ChanKind, Song};
-use crate::time::{Span, Time};
+use crate::time::Time;
 use crate::Error;
 use std::fmt;
 use std::path::Path;
@@ -194,6 +194,7 @@ fn truncate(s: &str, n: usize) -> String {
 impl Engine {
     pub(crate) fn build(song: &Song, opts: &RenderOptions) -> Result<Engine, Error> {
         let song_end = song.end();
+        let all_notes: Vec<Vec<crate::clip::Note>> = std::iter::once(vec![]).chain(song.tracks().iter().map(|t| t.notes())).collect();
         let mut d = song.data_mut();
         if d.rendered {
             return Err(Error::AlreadyRendered);
@@ -214,28 +215,12 @@ impl Engine {
         for (i, c) in d.chans.iter_mut().enumerate() {
             // ---- events
             let mut evs = vec![];
-            let mut notes = 0;
-            for p in &c.clips {
-                let (start, end) = match p.span {
-                    Span::At(t) => (t.0, t.0 + p.seq.len()),
-                    Span::Range(a, b) => (a.0, b.0),
-                    Span::From(a) => (a.0, song_end.0.max(a.0)),
-                };
-                if end <= start {
-                    continue;
-                }
-                for nt in p.seq.notes(0.0, end - start) {
-                    let s = start + nt.start;
-                    if s >= end || nt.dur <= 0.0 {
-                        continue;
-                    }
-                    let e = (s + nt.dur).min(end);
-                    let id = next_id;
-                    next_id += 1;
-                    notes += 1;
-                    evs.push(Ev { beat: s, kind: EvKind::On { id, pitch: nt.pitch + c.transpose, vel: (nt.vel * c.vel).clamp(0.0, 1.0), dur: e - s } });
-                    evs.push(Ev { beat: e, kind: EvKind::Off(id) });
-                }
+            let notes = all_notes[i].len();
+            for nt in &all_notes[i] {
+                let id = next_id;
+                next_id += 1;
+                evs.push(Ev { beat: nt.start, kind: EvKind::On { id, pitch: nt.pitch, vel: nt.vel, dur: nt.dur } });
+                evs.push(Ev { beat: nt.start + nt.dur, kind: EvKind::Off(id) });
             }
             evs.sort_by(|a, b| {
                 a.beat.total_cmp(&b.beat).then_with(|| {

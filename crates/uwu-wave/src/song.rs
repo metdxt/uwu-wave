@@ -394,6 +394,52 @@ impl Track {
     pub fn clip_count(&self) -> usize {
         self.song.borrow().chans[self.idx].clips.len()
     }
+    /// All notes of this track on the absolute timeline (beats), with the track's transpose and
+    /// velocity scaling applied and notes clipped at their placement's end. Sorted by start.
+    pub fn notes(&self) -> Vec<crate::clip::Note> {
+        let song = Song(self.song.clone());
+        let end = song.end();
+        let d = self.song.borrow();
+        let c = &d.chans[self.idx];
+        let mut out = vec![];
+        for p in &c.clips {
+            let (start, stop) = p.bounds(end);
+            if stop <= start {
+                continue;
+            }
+            for nt in p.seq.notes(0.0, stop - start) {
+                let s = start + nt.start;
+                if s >= stop || nt.dur <= 0.0 {
+                    continue;
+                }
+                out.push(crate::clip::Note {
+                    start: s,
+                    dur: (s + nt.dur).min(stop) - s,
+                    pitch: nt.pitch + c.transpose,
+                    vel: (nt.vel * c.vel).clamp(0.0, 1.0),
+                });
+            }
+        }
+        out.sort_by(|a, b| a.start.total_cmp(&b.start));
+        out
+    }
+    /// Placement regions `(start, end)` in beats (for arrangement views).
+    pub fn regions(&self) -> Vec<(f64, f64)> {
+        let end = Song(self.song.clone()).end();
+        let d = self.song.borrow();
+        d.chans[self.idx].clips.iter().map(|p| p.bounds(end)).collect()
+    }
+}
+
+impl Placement {
+    /// Absolute (start, end) in beats given the song end.
+    pub(crate) fn bounds(&self, song_end: Time) -> (f64, f64) {
+        match self.span {
+            Span::At(t) => (t.0, t.0 + self.seq.len()),
+            Span::Range(a, b) => (a.0, b.0),
+            Span::From(a) => (a.0, song_end.0.max(a.0)),
+        }
+    }
 }
 
 /// A section being filled (see [`Song::section`]). Positions are section-relative.
