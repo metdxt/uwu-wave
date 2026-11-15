@@ -65,6 +65,8 @@ struct Chan {
     sc: Vec<Option<usize>>,
     gain: Param,
     pan: Param,
+    bend: Param,
+    modwheel: Param,
     gl: Ramp,
     gr: Ramp,
     out: Option<usize>,
@@ -282,6 +284,10 @@ impl Engine {
             let mut inst = c.instrument.take();
             if let Some(inst) = inst.as_mut() {
                 inst.prepare(sr as f32);
+                let start = opts.from.map(|t| t.0).unwrap_or(0.0);
+                let stop = opts.to.map(|t| t.0).unwrap_or(f64::INFINITY);
+                let used: Vec<crate::clip::Note> = all_notes[i].iter().filter(|n| n.start >= start && n.start < stop).copied().collect();
+                inst.preload(&used);
             }
             let mut fx = std::mem::take(&mut c.fx);
             for f in &mut fx {
@@ -297,6 +303,8 @@ impl Engine {
                 sc,
                 gain: c.gain.clone(),
                 pan: c.pan.clone(),
+                bend: c.bend.clone(),
+                modwheel: c.modwheel.clone(),
                 gl: Ramp::default(),
                 gr: Ramp::default(),
                 out: if c.kind == ChanKind::Master { None } else { Some(c.output.unwrap_or(0)) },
@@ -472,7 +480,7 @@ impl Engine {
         let sr = self.sr as f32;
         let bps = bpm / 60.0 / sr as f64;
         let beat_end = self.beat + n as f64 * bps;
-        let base = Ctx { sr, clock, bpm, frame: self.frame, sidechain: None };
+        let base = Ctx { sr, clock, bpm, frame: self.frame, sidechain: None, bend: 0.0, modwheel: 0.0 };
         let over = self.beat >= self.end_beat;
 
         if over && !self.flushed {
@@ -494,6 +502,7 @@ impl Engine {
         for &ci in order.iter() {
             let mut buf = std::mem::take(&mut inputs[ci]);
             let c = &mut chans[ci];
+            let base = Ctx { bend: c.bend.at(clock), modwheel: c.modwheel.at(clock), ..base };
             // ---- instrument + events (sample accurate)
             if let Some(inst) = c.inst.as_mut() {
                 let mut pos = 0usize;

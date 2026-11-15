@@ -21,12 +21,18 @@ pub struct Ctx<'a> {
     /// Sidechain input for this block (same length as the processed buffer), if this effect
     /// declared one via [`Effect::sidechain`](crate::fx::Effect::sidechain).
     pub sidechain: Option<&'a [Frame]>,
+    /// Track pitch bend in semitones (from [`Track::bend`](crate::song::Track::bend)); instruments
+    /// add it to every sounding note's pitch.
+    pub bend: f32,
+    /// Track mod wheel 0..1 (from [`Track::modwheel`](crate::song::Track::modwheel)); instruments
+    /// map it to something expressive (vibrato depth, brightness...).
+    pub modwheel: f32,
 }
 
 impl<'a> Ctx<'a> {
     /// A context for tests/offline use.
     pub fn offline(sr: f32) -> Ctx<'static> {
-        Ctx { sr, clock: Clock::default(), bpm: 120.0, frame: 0, sidechain: None }
+        Ctx { sr, clock: Clock::default(), bpm: 120.0, frame: 0, sidechain: None, bend: 0.0, modwheel: 0.0 }
     }
     /// Evaluate a parameter now.
     #[inline]

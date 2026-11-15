@@ -63,6 +63,8 @@ pub(crate) struct ChanData {
     pub clips: Vec<Placement>,
     pub transpose: f32,
     pub vel: f32,
+    pub bend: Param,
+    pub modwheel: Param,
 }
 
 /// A named region of the arrangement.
@@ -304,6 +306,8 @@ impl ChanData {
             clips: vec![],
             transpose: 0.0,
             vel: 1.0,
+            bend: Param::Const(0.0),
+            modwheel: Param::Const(0.0),
         }
     }
 }
@@ -368,6 +372,25 @@ impl Track {
     pub fn velocity(&self, k: impl Val) -> Track {
         let k = k.val();
         self.with(|c| c.vel = k)
+    }
+    /// Pitch bend in **semitones** for everything this track plays (automatable):
+    /// `.bend(auto![bar(7) => 0, bar(8) => -12 => exp])` for a dive, `.bend(lfo::sine(6.0) * 0.2)` for vibrato.
+    pub fn bend(&self, st: impl Into<Param>) -> Track {
+        let p = st.into();
+        self.with(|c| c.bend = p)
+    }
+    /// Mod wheel 0..1 (automatable). Synths map it to vibrato depth / brightness.
+    pub fn modwheel(&self, m: impl Into<Param>) -> Track {
+        let p = m.into();
+        self.with(|c| c.modwheel = p)
+    }
+    /// The track's pitch-bend param (semitones).
+    pub fn bend_param(&self) -> Param {
+        self.song.borrow().chans[self.idx].bend.clone()
+    }
+    /// The track's mod-wheel param.
+    pub fn modwheel_param(&self) -> Param {
+        self.song.borrow().chans[self.idx].modwheel.clone()
     }
     /// Route this channel's output into a bus (instead of master).
     pub fn to(&self, bus: &Track) -> Track {

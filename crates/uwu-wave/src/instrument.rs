@@ -23,6 +23,10 @@ pub struct NoteOn {
 pub trait Instrument: Send {
     /// Called once before rendering with the sample rate.
     fn prepare(&mut self, _sr: f32) {}
+    /// Called after [`prepare`](Instrument::prepare) with every note this instrument will play
+    /// (absolute beats, track transpose/velocity applied). Sample-based instruments load exactly
+    /// what they need here, so nothing is loaded or downloaded while audio is running.
+    fn preload(&mut self, _notes: &[crate::clip::Note]) {}
     fn note_on(&mut self, note: &NoteOn, ctx: &Ctx);
     fn note_off(&mut self, id: u64, ctx: &Ctx);
     /// Add audio for this block into `out`.
@@ -41,6 +45,9 @@ pub trait Instrument: Send {
 impl Instrument for Box<dyn Instrument> {
     fn prepare(&mut self, sr: f32) {
         (**self).prepare(sr)
+    }
+    fn preload(&mut self, notes: &[crate::clip::Note]) {
+        (**self).preload(notes)
     }
     fn note_on(&mut self, note: &NoteOn, ctx: &Ctx) {
         (**self).note_on(note, ctx)
@@ -274,6 +281,10 @@ impl<A: Instrument, B: Instrument> Instrument for Layer<A, B> {
     fn prepare(&mut self, sr: f32) {
         self.0.prepare(sr);
         self.1.prepare(sr);
+    }
+    fn preload(&mut self, notes: &[crate::clip::Note]) {
+        self.0.preload(notes);
+        self.1.preload(notes);
     }
     fn note_on(&mut self, note: &NoteOn, ctx: &Ctx) {
         self.0.note_on(note, ctx);
