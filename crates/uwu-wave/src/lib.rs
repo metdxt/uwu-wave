@@ -5,11 +5,19 @@
 //!
 //! ```no_run
 //! use uwu_wave::prelude::*;
-//! let song = Song::new("hello").bpm(120);
-//! // ...
+//! let song = Song::new("hello").bpm(124);
+//! let kick = song.track("kick", DrumMachine::tr909());
+//! let bass = song.track("bass", Synth::acid()).fx(Ducker::new("kick"));
+//! song.section("loop", 4.bars(), |s| {
+//!     s.play(&kick, "bd*4");
+//!     s.play(&bass, "a1 a1 [a2 a1] e2");
+//! });
 //! song.run();
 //! ```
-#![allow(clippy::new_without_default)]
+//!
+//! See the repository README for the full tour.
+#![allow(clippy::new_without_default, clippy::needless_range_loop, clippy::should_implement_trait, clippy::len_without_is_empty)]
+#![allow(rustdoc::redundant_explicit_links, rustdoc::broken_intra_doc_links)]
 
 pub mod error;
 pub mod units;

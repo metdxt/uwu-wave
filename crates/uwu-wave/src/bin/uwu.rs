@@ -306,12 +306,11 @@ fn main() {{
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => die("file watcher stopped"),
             }
-            if let Some(c) = child.as_mut() {
-                if let Ok(Some(st)) = c.try_wait() {
+            if let Some(c) = child.as_mut()
+                && let Ok(Some(st)) = c.try_wait() {
                     child = None;
                     eprintln!("■ finished ({st}) — waiting for changes");
                 }
-            }
         }
     }
 }
