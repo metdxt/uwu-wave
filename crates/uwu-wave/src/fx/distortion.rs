@@ -200,6 +200,9 @@ impl Effect for Distortion {
     fn tail(&self) -> f32 {
         0.01
     }
+    fn latency(&self) -> usize {
+        if self.oversample { Os2x::LATENCY } else { 0 }
+    }
     fn name(&self) -> String {
         format!("distortion({:?})", self.mode).to_lowercase()
     }
@@ -271,6 +274,9 @@ impl Effect for TapeSat {
     }
     fn tail(&self) -> f32 {
         0.02
+    }
+    fn latency(&self) -> usize {
+        self.dist.latency()
     }
     fn name(&self) -> String {
         "tape".into()

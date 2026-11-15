@@ -19,7 +19,7 @@ fn main() {
         s.play(&kick, "bd*4");
         s.play(&drums, drums! { cp: "....x.......x...", hh: "x.x.x.xxx.x.x.x." });
         s.play(&bass, n("0 0 7 0 3 0 10 5").scale(key.oct(-1)).fast(2));
-        s.play(&pad, Pattern::from(chords.clone()));
+        s.play(&pad, &chords);
     });
 
     song.run(); // CLI: render / --play / --info / --stems / --midi ...

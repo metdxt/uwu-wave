@@ -80,8 +80,19 @@ pub trait Effect: Send {
     fn sidechain(&self) -> Option<&str> {
         None
     }
+    /// All sidechain sources this effect (or the effects inside it) wants. Each is delivered via
+    /// [`Ctx::sidechain_from`]; the first one is also [`Ctx::sidechain`]. Called once at build.
+    fn sidechains(&self) -> Vec<String> {
+        self.sidechain().into_iter().map(Into::into).collect()
+    }
     fn name(&self) -> String {
         "fx".into()
+    }
+    /// Processing latency in samples (look-ahead, oversampling filters…) at the sample rate
+    /// given to [`Effect::prepare`]. Valid after `prepare`; the engine uses it for plugin delay
+    /// compensation.
+    fn latency(&self) -> usize {
+        0
     }
 }
 
@@ -101,8 +112,14 @@ impl Effect for Box<dyn Effect> {
     fn sidechain(&self) -> Option<&str> {
         (**self).sidechain()
     }
+    fn sidechains(&self) -> Vec<String> {
+        (**self).sidechains()
+    }
     fn name(&self) -> String {
         (**self).name()
+    }
+    fn latency(&self) -> usize {
+        (**self).latency()
     }
 }
 

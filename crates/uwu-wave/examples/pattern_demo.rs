@@ -33,7 +33,7 @@ fn main() {
 
     // ---- harmony: i VI III VII in D minor (Dm Bb F C), voice-led around D4
     let chords = voice_lead(key.oct(1).prog("i VI III VII"));
-    let pads = Pattern::from(chords.clone()).legato(0.97).vel(0.6);
+    let pads = chords.pat().legato(0.97).vel(0.6);
 
     // ---- drums
     let beat = drums! {
@@ -47,8 +47,9 @@ fn main() {
         .humanize(0.01, 0.08)
         .degrade_by(0.08);
     let fill = p("~ ~ ~ [sd sd sd [sd ht mt lt]]^0.7");
-    let groove = (beat.clone() & hats.clone()).last_of(4, |p| p & fill.clone());
-    let perc = p("rim(3,8,2) ~, sh*8?0.3").gain(0.7);
+    let groove = (&beat & &hats).last_of(4, |p| p & &fill);
+    // patterned arguments: the rim alternates 3 and 5 euclidean hits, the shaker doubles up
+    let perc = p("rim(<3 5>,8,2), sh*<8 [8 16]>?0.3").gain(0.7);
 
     // ---- bass: chord roots as scale degrees, re-rhythmed, the odd octave jump
     let bassline = n("<0 5 2 6>")
@@ -58,7 +59,8 @@ fn main() {
         .rarely(|p| p.oct(1));
 
     // ---- arp: the same progression arpeggiated in 16ths
-    let arps = Pattern::from(chords.clone())
+    let arps = chords
+        .pat()
         .oct(1)
         .arp("updown", 16)
         .vel(0.55)
@@ -70,30 +72,30 @@ fn main() {
         .every(4, |p| p.rev())
         .legato(0.9)
         .off(0.125, |p| p.up(12).gain(0.35));
-    let hook = pat![~ ~ <[a4 c5] [bb4 d5] [c5 f5] [c5 e5]> ~];
+    let hook = pat![~ ~ <[a4 c5] [bb4 d5] [c5 f5] [c5 e5]> ~].echo(3, 3.0 / 16.0, 0.5);
 
     // ---- arrangement
     song.section("intro", 4.bars(), |s| {
-        s.play(&pad, pads.clone());
-        s.play(&drums, hats.clone().mask("<0 0 1 1>"));
-        s.play(&arp, arps.clone().gain(0.7));
+        s.play(&pad, &pads);
+        s.play(&drums, hats.mask("<0 0 1 1>"));
+        s.play(&arp, arps.gain(0.7));
     });
     song.section("groove", 8.bars(), |s| {
-        s.play(&drums, groove.clone() & perc.clone());
-        s.play(&bass, bassline.clone());
-        s.play(&pad, pads.clone());
-        s.play(&arp, arps.clone());
-        s.play(&lead, melody.clone() & hook.clone());
+        s.play(&drums, &groove & &perc);
+        s.play(&bass, &bassline);
+        s.play(&pad, &pads);
+        s.play(&arp, &arps);
+        s.play(&lead, &melody & &hook);
     });
     song.section("break", 4.bars(), |s| {
-        s.play(&pad, pads.clone().open());
-        s.play(&lead, melody.clone().palindrome().slow(2).staccato());
-        s.play(&drums, p("bd ~ ~ ~, ~ cp").every(2, |p| p.ply(2)));
+        s.play(&pad, pads.open());
+        s.play(&lead, melody.palindrome().slow(2).staccato());
+        s.play(&drums, p("bd ~ ~ ~, ~ cp").every(2, |p| p.chop(2)));
     });
     song.section("outro", 4.bars(), |s| {
-        s.play(&drums, beat.clone() & hats.clone());
-        s.play(&bass, bassline.clone());
-        s.play(&pad, Pattern::from(chords.clone()).strum(eighth() * 0.25));
+        s.play(&drums, &beat & &hats);
+        s.play(&bass, &bassline);
+        s.play(&pad, chords.pat().strum(eighth() * 0.25));
     });
 
     song.run();

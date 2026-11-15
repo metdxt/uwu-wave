@@ -21,6 +21,8 @@ pub struct Ctx<'a> {
     /// Sidechain input for this block (same length as the processed buffer), if this effect
     /// declared one via [`Effect::sidechain`](crate::fx::Effect::sidechain).
     pub sidechain: Option<&'a [Frame]>,
+    /// Every sidechain input of this insert by source name (see [`Effect::sidechains`](crate::fx::Effect::sidechains)).
+    pub sidechains: &'a [(&'a str, &'a [Frame])],
     /// Track pitch bend in semitones (from [`Track::bend`](crate::song::Track::bend)); instruments
     /// add it to every sounding note's pitch.
     pub bend: f32,
@@ -32,7 +34,11 @@ pub struct Ctx<'a> {
 impl<'a> Ctx<'a> {
     /// A context for tests/offline use.
     pub fn offline(sr: f32) -> Ctx<'static> {
-        Ctx { sr, clock: Clock::default(), bpm: 120.0, frame: 0, sidechain: None, bend: 0.0, modwheel: 0.0 }
+        Ctx { sr, clock: Clock::default(), bpm: 120.0, frame: 0, sidechain: None, sidechains: &[], bend: 0.0, modwheel: 0.0 }
+    }
+    /// The sidechain buffer coming from the track/bus called `name`, if this insert requested it.
+    pub fn sidechain_from(&self, name: &str) -> Option<&'a [Frame]> {
+        self.sidechains.iter().find(|(n, _)| *n == name).map(|(_, b)| *b)
     }
     /// Evaluate a parameter now.
     #[inline]

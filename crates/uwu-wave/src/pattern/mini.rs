@@ -58,11 +58,25 @@ enum Node {
     Alt(Vec<Step>),
     Stack(Vec<Node>),
     Poly(Vec<Vec<Step>>, Option<Rat>),
-    Fast(Box<Node>, Rat),
-    Slow(Box<Node>, Rat),
+    Fast(Box<Node>, Arg),
+    Slow(Box<Node>, Arg),
     Degrade(Box<Node>, f32, u64),
-    Euclid(Box<Node>, u32, u32, i32),
+    Euclid(Box<Node>, IArg, IArg, IArg),
     Vel(Box<Node>, f32),
+}
+
+/// A modifier argument: a constant or a (sub-)pattern of numbers (`a*<2 3>`, `hh*[2 4]`).
+#[derive(Clone, Debug)]
+enum Arg {
+    Rat(Rat),
+    Pat(Box<Node>),
+}
+
+/// An integer euclid argument: constant or patterned (`bd(<3 5>,8)`).
+#[derive(Clone, Debug)]
+enum IArg {
+    Int(i64),
+    Pat(Box<Node>),
 }
 
 #[derive(Clone, Debug)]
@@ -187,7 +201,12 @@ impl Parser<'_> {
             match c {
                 '*' | '/' => {
                     self.pos += 1;
-                    let k = self.rat_arg(op_pos)?;
+                    self.skip_ws();
+                    let k = if matches!(self.peek(), Some('<' | '[')) {
+                        Arg::Pat(Box::new(self.term()?))
+                    } else {
+                        Arg::Rat(self.rat_arg(op_pos)?)
+                    };
                     node = if c == '*' {
                         Node::Fast(Box::new(node), k)
                     } else {
@@ -248,10 +267,14 @@ impl Parser<'_> {
                 }
                 '(' => {
                     self.pos += 1;
-                    let mut args = vec![];
+                    let mut args: Vec<(IArg, usize, usize)> = vec![];
                     loop {
                         self.skip_ws();
-                        if self.peek() == Some('-')
+                        if matches!(self.peek(), Some('<' | '[')) {
+                            let p0 = self.pos;
+                            let t = self.term()?;
+                            args.push((IArg::Pat(Box::new(t)), p0, self.pos - p0));
+                        } else if self.peek() == Some('-')
                             || self.peek().is_some_and(|c| c.is_ascii_digit())
                         {
                             let (v, p0, l) = self.number()?;
@@ -262,12 +285,12 @@ impl Parser<'_> {
                                     "euclid arguments must be whole numbers",
                                 ));
                             }
-                            args.push((v as i64, p0, l));
+                            args.push((IArg::Int(v as i64), p0, l));
                         } else {
                             return Err(self.err(
                                 self.pos,
                                 1,
-                                "expected a number in euclid arguments, e.g. bd(3,8) or bd(3,8,2)",
+                                "expected a number or <..>/[..] pattern in euclid arguments, e.g. bd(3,8), bd(3,8,2), bd(<3 5>,8)",
                             ));
                         }
                         self.skip_ws();
@@ -287,22 +310,31 @@ impl Parser<'_> {
                         }
                     }
                     if args.len() < 2 || args.len() > 3 {
-                        return Err(self.err(op_pos, self.pos - op_pos, "euclid needs 2 or 3 arguments: (hits, steps) or (hits, steps, rotation)"));
-                    }
-                    let (k, kp, kl) = args[0];
-                    let (n, np, nl) = args[1];
-                    if !(1..=256).contains(&n) {
-                        return Err(self.err(np, nl, "euclid steps must be between 1 and 256"));
-                    }
-                    if k < 0 || k > n {
                         return Err(self.err(
-                            kp,
-                            kl,
+                            op_pos,
+                            self.pos - op_pos,
+                            "euclid needs 2 or 3 arguments: (hits, steps) or (hits, steps, rotation)",
+                        ));
+                    }
+                    if let (IArg::Int(n), np, nl) = &args[1]
+                        && !(1..=256).contains(n)
+                    {
+                        return Err(self.err(*np, *nl, "euclid steps must be between 1 and 256"));
+                    }
+                    if let ((IArg::Int(k), kp, kl), (IArg::Int(n), _, _)) = (&args[0], &args[1])
+                        && (*k < 0 || k > n)
+                    {
+                        return Err(self.err(
+                            *kp,
+                            *kl,
                             "euclid hits must be between 0 and the number of steps",
                         ));
                     }
-                    let r = args.get(2).map(|a| a.0).unwrap_or(0);
-                    node = Node::Euclid(Box::new(node), k as u32, n as u32, r as i32);
+                    let mut it = args.into_iter().map(|a| a.0);
+                    let k = it.next().unwrap();
+                    let n = it.next().unwrap();
+                    let r = it.next().unwrap_or(IArg::Int(0));
+                    node = Node::Euclid(Box::new(node), k, n, r);
                 }
                 _ => {
                     self.pos = save;
@@ -576,26 +608,56 @@ fn compile(node: &Node) -> Pattern {
                     .collect::<Vec<_>>(),
             )
         }
-        Node::Fast(n, k) => compile(n).fast_rat(*k),
-        Node::Slow(n, k) => compile(n).fast_rat(Rat::ONE.div(*k)),
+        Node::Fast(n, Arg::Rat(k)) => compile(n).fast_rat(*k),
+        Node::Fast(n, Arg::Pat(k)) => compile(n).fast_by(compile(k)),
+        Node::Slow(n, Arg::Rat(k)) => compile(n).fast_rat(Rat::ONE.div(*k)),
+        Node::Slow(n, Arg::Pat(k)) => compile(n).slow_by(compile(k)),
         Node::Degrade(n, prob, seed) => compile(n).degrade_seeded(*prob, *seed),
         Node::Euclid(n, k, steps, r) => {
             let inner = compile(n);
-            let items = euclid_bools(*k, *steps, *r)
-                .into_iter()
-                .map(|b| {
-                    if b {
-                        (inner.clone(), 1.0)
-                    } else {
-                        (Pattern::silence(), 1.0)
-                    }
-                })
-                .collect();
-            Pattern::fastcat_w(items)
+            match (k, steps, r) {
+                (IArg::Int(k), IArg::Int(steps), IArg::Int(r)) => {
+                    euclid_pattern(&inner, *k as f64, *steps as f64, *r as f64)
+                }
+                _ => {
+                    let (kp, np, rp) = (iarg_pat(k), iarg_pat(steps), iarg_pat(r));
+                    Pattern::patterned(&kp, move |k| {
+                        let (inner, rp) = (inner.clone(), rp.clone());
+                        Pattern::patterned(&np, move |n| {
+                            let inner = inner.clone();
+                            Pattern::patterned(&rp, move |r| euclid_pattern(&inner, k, n, r))
+                        })
+                    })
+                }
+            }
         }
         Node::Vel(n, v) => {
             let v = *v;
             compile(n).map_events(move |e| super::Event { vel: v, ..e })
         }
     }
+}
+
+fn iarg_pat(a: &IArg) -> Pattern {
+    match a {
+        IArg::Int(v) => Pattern::atom(*v as f32, DEFAULT_VEL),
+        IArg::Pat(node) => compile(node),
+    }
+}
+
+/// `inner` placed on the hits of a euclidean rhythm (values are rounded and clamped).
+fn euclid_pattern(inner: &Pattern, k: f64, n: f64, r: f64) -> Pattern {
+    let n = n.round().clamp(1.0, 256.0);
+    let k = k.round().clamp(0.0, n);
+    let items = euclid_bools(k as u32, n as u32, r.round() as i32)
+        .into_iter()
+        .map(|b| {
+            if b {
+                (inner.clone(), 1.0)
+            } else {
+                (Pattern::silence(), 1.0)
+            }
+        })
+        .collect();
+    Pattern::fastcat_w(items)
 }

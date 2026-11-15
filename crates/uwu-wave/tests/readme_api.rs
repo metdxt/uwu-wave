@@ -31,12 +31,16 @@ fn readme_snippets_compile_and_render() {
     let chords = voice_lead(key.prog("i VI III VII"));
     let beat = drums! { bd: "X... x... X... x...", sd: ".... x... .... x...", hh: "x.x.x.x.x.x.x.x." };
     let hook = p("c4 e4 g4").fast(2).rev().every(4, |p| p.up(12)).swing16(0.2).humanize(0.01, 0.1);
-    let degs = n("0 2 4 <6 7>").scale(Key::parse("D dorian").unwrap());
-    let arps = Pattern::from(chords.clone()).arp("updown", 16).legato(0.8);
+    let degs = n("0 2 4 <6 7>").scale("D4 dorian");
+    let arps = chords.pat().arp("updown", 16).legato(0.8);
     let _m = pat![c4 e4 [g4 b4]*2 ~];
-    let _ops = hook.clone() & degs.clone();
-    let _ops2 = hook.clone() + degs.clone();
-    let _ops3 = hook.clone() * 4;
+    let fill = p("~ ~ ~ [sd*4]");
+    let _groove = beat.last_of(4, |p| p & &fill);
+    let _ops = &beat & "~ ~ ~ cr";
+    let _ops2 = &hook + &degs;
+    let _ops3 = &beat * 4;
+    let _pr2 = p("hh*<8 16> rim(<3 5>,8)").chop(2).echo(3, 0.125, 0.5);
+    let _x = (Cs4 == Db4, C4 + 7 == G4, Key::parse("F# dorian").unwrap().quantize(E4));
 
     song.section("verse", 4.bars(), |s| {
         s.play(&kick, &beat);
@@ -51,9 +55,26 @@ fn readme_snippets_compile_and_render() {
     song.section("drop", 2.bars(), |s| {
         s.ramp_exp(&cutoff, 400.0, 20_000.0);
         s.play(&lead, &arps);
+        s.play(&bass, &chords);
     });
     lead.play(bar(6), Clip::new(4.beats()).note(0, 1, C4, 0.8));
     let r = song.render_with(&RenderOptions { no_tail: true, ..Default::default() }).unwrap();
     assert!(r.report.master_peak_db < 0.0 && r.report.master_peak_db > -40.0);
     assert_eq!(song.locate("hook"), Some(bar(2)));
+}
+
+/// Compile-only check of the README's bend / sampler / sidechain snippets.
+#[allow(dead_code)]
+fn readme_round2_snippets() {
+    let song = Song::new("r2");
+    let _lead = song
+        .track("lead", Synth::lead().mod_cutoff(1.5))
+        .bend(auto![0 => 0.0, bar(7) => 0.0, bar(8) => -12.0])
+        .modwheel(lfo::tri(4.bars()).unipolar());
+    let _s = Sampler::new()
+        .zone(Zone::new("soft.wav", "C4").vel(0.0, 0.5))
+        .zone(Zone::new("hard.wav", "C4").vel(0.5, 1.0))
+        .vel_xfade(0.15);
+    let _c = chain![Ducker::new("kick"), Ducker::new("snare")];
+    let _p = p("hh*<2 4> bd(<3 5>,8)").chop(2);
 }

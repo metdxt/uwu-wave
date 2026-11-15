@@ -479,3 +479,97 @@ fn plays_on_a_song() {
     // 4 bars * 5 + 2 bars * 3 + 2 * 2 + 2 * 4 + 2 * 3
     assert_eq!(notes.len(), 20 + 6 + 4 + 8 + 6);
 }
+
+#[test]
+fn patterned_modifier_args() {
+    let a = p("hh*<2 3>");
+    assert_eq!(a.cycles(), 2.0);
+    assert_eq!(a.events(0.0, 1.0).len(), 2);
+    assert_eq!(a.events(1.0, 2.0).len(), 3);
+    let b = p("hh*[2 4]");
+    let s: Vec<f64> = b.first_cycle().iter().map(|e| e.start).collect();
+    assert_eq!(s, vec![0.0, 0.5, 0.75]);
+    let c = p("[c4 d4]/<1 2>");
+    assert_eq!(pitches(&c, 0.0, 1.0), vec![60.0, 62.0]);
+    assert_eq!(pitches(&c, 1.0, 2.0).len(), 1);
+    let d = p("bd(<3 5>,8)");
+    assert_eq!(d.events(0.0, 1.0).len(), 3);
+    assert_eq!(d.events(1.0, 2.0).len(), 5);
+    assert_eq!(d.cycles(), 2.0);
+    let e = p("bd(3,8,<0 2>)");
+    assert_eq!(
+        e.events(1.0, 2.0)
+            .iter()
+            .map(|e| ((e.start - 1.0) * 8.0).round())
+            .collect::<Vec<_>>(),
+        vec![1.0, 4.0, 6.0]
+    );
+    assert_eq!(p("c4").fast_by("<1 2>").events(0.0, 2.0).len(), 3);
+    assert!(Pattern::parse("bd(<3 5>,8").is_err());
+}
+
+#[test]
+fn chop_stutter_echo() {
+    assert_eq!(
+        pitches(&p("c4 d4").chop(2), 0.0, 1.0),
+        vec![60.0, 60.0, 62.0, 62.0]
+    );
+    let s = p("c4 ~ ~ ~").stutter(3, 0.125);
+    assert_eq!(
+        s.first_cycle().iter().map(|e| e.start).collect::<Vec<_>>(),
+        vec![0.0, 0.125, 0.25]
+    );
+    let e = p("c4 ~ ~ ~").echo(3, 0.125, 0.5);
+    let v: Vec<f32> = e.first_cycle().iter().map(|e| e.vel).collect();
+    assert_eq!(v, vec![0.8, 0.4, 0.2]);
+}
+
+#[test]
+fn borrowed_operators_and_conversions() {
+    let beat = p("bd*4");
+    let fill = p("~ ~ ~ sd");
+    let a = &beat & &fill;
+    let b = &beat & "~ ~ ~ cr";
+    let c = &beat + &fill;
+    let d = &beat * 2;
+    let e = beat.fast(2).rev(); // no clones needed, beat still usable
+    let f = beat.last_of(4, |p| p & &fill);
+    assert_eq!(a.first_cycle().len(), 5);
+    assert_eq!(b.first_cycle().len(), 5);
+    assert_eq!(c.cycles(), 2.0);
+    assert_eq!(d.cycles(), 2.0);
+    assert_eq!(e.first_cycle().len(), 8);
+    assert_eq!(f.events(3.0, 4.0).len(), 5);
+    let chords = Key::major(C4).prog("I IV V");
+    let g = Pattern::from(&chords) & C4 & &C4.maj7();
+    assert_eq!(g.cycles(), 3.0);
+    assert_eq!(chords.pat().cycles(), 3.0);
+    assert_eq!("c4 e4".pat().first_cycle().len(), 2);
+    assert_eq!(C4.maj7().pat().first_cycle().len(), 4);
+    assert_eq!(C4.pat().first_cycle().len(), 1);
+    assert_eq!(Pattern::from([C4, E4, G4]).first_cycle().len(), 3);
+    let _: std::sync::Arc<dyn Seq> = (&chords).into_seq();
+    let _: std::sync::Arc<dyn Seq> = (&C4.maj()).into_seq();
+}
+
+#[test]
+fn combining_different_cycle_lengths_keeps_beats() {
+    crate::time::set_meter(4, 4);
+    let two = p("c4 d4").cycle(2.0); // 1 note per beat
+    let bar = p("e4 f4 g4 a4"); // 1 note per beat in 4/4
+    let st = &bar & &two;
+    // every beat has two notes
+    let n = st.notes(0.0, 4.0);
+    assert_eq!(n.len(), 8, "{n:?}");
+    assert!(
+        n.iter()
+            .all(|n| (n.start - n.start.round()).abs() < 1e-9 && (n.dur - 1.0).abs() < 1e-9)
+    );
+    let cat = &bar + &two;
+    assert_eq!(Seq::len(&cat), 6.0);
+    let n = cat.notes(0.0, 6.0);
+    assert_eq!(
+        n.iter().map(|n| n.start).collect::<Vec<_>>(),
+        vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    );
+}

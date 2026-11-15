@@ -27,6 +27,8 @@ fn main() {
     // created up-front, handed to knobs, written later by the arrangement
     let sweep = Lane::new(20_000.0); // low-pass on the whole music bus (risers / breakdowns)
     let lead_cut = Lane::new(2_400.0); // supersaw brightness
+    let wheel = Lane::new(0.0); // lead mod wheel (vibrato + filter swell)
+    let scoop = Lane::new(0.0); // lead pitch bend in semitones
     let crush = Lane::new(0.0); // bitcrush wet amount on the drums
 
     // ──────────────────────────── buses ────────────────────────────
@@ -72,7 +74,9 @@ fn main() {
         .send(&verb, -8.db())
         .to(&music);
     let lead = song
-        .track("lead", Synth::supersaw().cutoff(&lead_cut))
+        .track("lead", Synth::supersaw().cutoff(&lead_cut).mod_cutoff(1.0))
+        .bend(&scoop)
+        .modwheel(&wheel)
         .gain(-8.db())
         .send(&echo, -8.db())
         .send(&verb, -12.db())
@@ -93,9 +97,9 @@ fn main() {
     // ─────────────────────────── material ───────────────────────────
     // i – VI – III – VII  (Am F C G), voice-led around A4
     let chords = voice_lead(key.oct(1).prog("i VI III VII"));
-    let pads = Pattern::from(chords.clone()).legato(1.0).vel(0.55);
-    let stabs = Pattern::from(chords.clone()).struct_("~ x ~ ~ ~ x ~ x").legato(0.4).vel(0.7);
-    let arps = Pattern::from(chords.clone()).oct(1).arp("updown", 16).vel(0.5).humanize(0.005, 0.1);
+    let pads = chords.pat().legato(1.0).vel(0.55);
+    let stabs = chords.pat().struct_("~ x ~ ~ ~ x ~ x").legato(0.4).vel(0.7);
+    let arps = chords.pat().oct(1).arp("updown", 16).vel(0.5).humanize(0.005, 0.1);
 
     let four = p("bd*4");
     let groove = drums! {
@@ -105,7 +109,7 @@ fn main() {
     }
     .swing16(0.2);
     let fill = p("~ ~ ~ [sd sd [sd sd] [ht mt lt lt]]^0.75");
-    let beat = (groove.clone()).last_of(4, |p| p & fill.clone());
+    let beat = groove.last_of(4, |p| p & &fill);
 
     // acid line in scale degrees, accents on the off-beats
     let acid = n("<[0 0 7 0 3 0 10 5] [0 ~ 0 12 ~ 3 5 7] [-2 -2 5 -2 3 ~ 2 3] [-3 4 -3 ~ 2 -3 6 ~]>")
@@ -119,13 +123,13 @@ fn main() {
         .scale(key.oct(1))
         .legato(0.92)
         .off(eighth().0 / 4.0, |p| p.up(12).gain(0.3));
-    let piano_part = Pattern::from(chords.clone()).strum(0.04).vel(0.6) & melody.clone().down(12).gain(0.5);
+    let piano_part = chords.pat().strum(0.04).vel(0.6) & melody.down(12).gain(0.5);
     let sparkle = p("e6 ~ b5 ~ ~ a5 ~ ~, ~ ~ ~ c6?0.5").slow(2).vel(0.6);
 
     // ───────────────────────── arrangement ─────────────────────────
     song.section("intro", 8.bars(), |s| {
         s.play(&pad, &pads);
-        s.play(&piano, Pattern::from(chords.clone()).strum(0.06).vel(0.5));
+        s.play(&piano, chords.pat().strum(0.06).vel(0.5));
         s.during(4.bars()..8.bars(), &drums, p("hh*8").vels("0.5 0.25"));
         s.ramp_exp(&sweep, 400.0, 6_000.0);
     });
@@ -140,19 +144,22 @@ fn main() {
     });
     song.section("build", 8.bars(), |s| {
         s.play(&pad, &stabs);
-        s.play(&harp, arps.clone().fast(2));
+        s.play(&harp, arps.fast(2));
         s.play(&drums, p("<[sd*4] [sd*8] [sd*16] [sd*16]>").vels("0.4 0.6 0.8 1"));
-        s.play(&lead, melody.clone().gain(0.6));
+        s.play(&lead, melody.gain(0.6));
         s.ramp_exp(&sweep, 900.0, 20_000.0);
         s.ramp_exp(&lead_cut, 600.0, 5_000.0);
+        s.ramp(&wheel, 0.0, 1.0);
+        s.ramp_in(&scoop, 7.bars()..8.bars(), -12.0, 0.0, Curve::Smooth); // octave scoop into the drop
         s.ramp_in(&crush, 6.bars()..8.bars(), 0.0, 0.8, Curve::Linear);
         s.marker("riser-peak", 7.bars());
     });
     song.section("drop", 16.bars(), |s| {
         s.set(&crush, 0.0);
         s.set(&lead_cut, 7_000.0);
+        s.set(&wheel, 0.25);
         s.play(&kick, &four);
-        s.play(&drums, beat.clone() & p("~ ~ ~ ~ ~ ~ ~ cr").slow(4));
+        s.play(&drums, &beat & p("~ ~ ~ ~ ~ ~ ~ cr").slow(4));
         s.play(&bass, &acid);
         s.play(&sub, &sub_line);
         s.play(&pad, &pads);
@@ -161,9 +168,9 @@ fn main() {
         s.play(&harp, &arps);
     });
     song.section("breakdown", 8.bars(), |s| {
-        s.play(&pad, pads.clone().open());
+        s.play(&pad, pads.open());
         s.play(&piano, &piano_part);
-        s.play(&bells, sparkle.clone().slow(2));
+        s.play(&bells, sparkle.slow(2));
         s.ramp_exp(&sweep, 20_000.0, 1_200.0);
     });
     song.section("outro", 8.bars(), |s| {
@@ -171,7 +178,7 @@ fn main() {
         s.during(0.bars()..4.bars(), &kick, &four);
         s.play(&drums, p("hh*8").vels("0.5 0.25"));
         s.play(&pad, &pads);
-        s.once(&piano, Pattern::from(chords[0].clone()).vel(0.6).slow(4));
+        s.once(&piano, chords[0].pat().vel(0.6).slow(4));
     });
     // fade the music bus out over the last 4 bars
     let outro_start = song.locate("outro").unwrap();

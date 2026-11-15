@@ -53,19 +53,31 @@ pub(crate) struct Play {
     fade_in_step: f32,
 }
 
+/// Octave mip-map selection: the (possibly decimated) sample to read and the read step, so we
+/// never read much faster than real time (which would alias).
+pub(crate) fn mip(smp: &Arc<Sample>, ratio: f64, out_sr: f32) -> (&Arc<Sample>, f64) {
+    let mut s = smp;
+    let mut step = ratio * smp.sr as f64 / out_sr as f64;
+    let mut level = 0;
+    while step > 1.6 && level < 3 && s.len() > 64 {
+        s = s.half();
+        step *= 0.5;
+        level += 1;
+    }
+    (s, step)
+}
+
+/// Compute (ahead of time) the mip levels a note at `ratio` will need — keeps the decimation
+/// allocation out of the audio thread. Also covers up to +2 semitones of bend.
+pub(crate) fn warm(smp: &Arc<Sample>, ratio: f64, out_sr: f32) {
+    mip(smp, ratio * 1.123, out_sr);
+}
+
 impl Play {
     /// Start playing `smp`, advancing `ratio` source frames (at the sample's own rate) per output
     /// frame at `out_sr`... i.e. `ratio` is the pitch ratio (1 = original pitch).
     pub(crate) fn start(smp: &Arc<Sample>, reg: &Region, ratio: f64, out_sr: f32) -> Play {
-        let mut s = smp;
-        let mut step = ratio * smp.sr as f64 / out_sr as f64;
-        // octave mip-map: avoid aliasing when reading much faster than real time
-        let mut level = 0;
-        while step > 1.6 && level < 3 && s.len() > 64 {
-            s = s.half();
-            step *= 0.5;
-            level += 1;
-        }
+        let (s, step) = mip(smp, ratio, out_sr);
         let sr = s.sr as f64;
         let len = s.len() as f64;
         let trim = if reg.trim {

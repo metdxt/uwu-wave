@@ -191,10 +191,10 @@ pub fn parse_position(song: &Song, s: &str, is_end: bool) -> Result<Time, String
     if let Ok(b) = s.parse::<f64>() {
         return Ok(Time(b * bpb));
     }
-    if let Some((b, beat)) = s.split_once(':') {
-        if let (Ok(b), Ok(beat)) = (b.parse::<f64>(), beat.parse::<f64>()) {
-            return Ok(Time(b * bpb + beat));
-        }
+    if let Some((b, beat)) = s.split_once(':')
+        && let (Ok(b), Ok(beat)) = (b.parse::<f64>(), beat.parse::<f64>())
+    {
+        return Ok(Time(b * bpb + beat));
     }
     if let Some(sec) = song.sections().into_iter().find(|x| x.name == s) {
         return Ok(if is_end { sec.end() } else { sec.start });

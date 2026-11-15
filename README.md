@@ -25,7 +25,7 @@ fn main() {
         s.play(&kick, "bd*4");
         s.play(&drums, drums! { cp: "....x.......x...", hh: "x.x.x.xxx.x.x.x." });
         s.play(&bass, n("0 0 7 0 3 0 10 5").scale(key.oct(-1)).fast(2));
-        s.play(&pad, Pattern::from(chords.clone()));
+        s.play(&pad, &chords);
     });
 
     song.run(); // CLI: render / --play / --info / --stems / --midi ...
@@ -96,6 +96,17 @@ track.volume_db(auto![bar(60) => 0, bar(64) => -40])         // fades in dB
 auto![0 => 0.2, 0.25 => 1.0 => exp, 1 => 1.0].looped(1.beats())   // repeating per-beat shape
 ```
 
+Pitch bend and mod wheel are track-level controls (semitones, 0..1) that every instrument follows:
+
+```rust
+let lead = song.track("lead", Synth::lead().mod_cutoff(1.5))
+    .bend(auto![0 => 0.0, bar(7) => 0.0, bar(8) => -12.0])   // dive an octave
+    .modwheel(lfo::tri(4.bars()).unipolar());                // vibrato + filter swell
+```
+Synths add vibrato and open the filter, `Fm` gets brighter, `Organ` speeds up its rotary,
+`Pluck` strings bend while ringing, and samplers re-pitch smoothly. `--midi` exports both
+as pitch-bend (with an RPN bend range) and CC1.
+
 A **`Lane`** is a shared automation lane. Create it, give it to any knob, and let the
 arrangement write it:
 
@@ -113,28 +124,34 @@ song.section("build", 8.bars(), |s| { s.ramp_exp(&sweep, 400.0, 20_000.0); });
 "c4 <e4 g4 bb4>"            // <..> alternates per cycle
 "c4@3 e4 _ ~"               // @ weight, _ tie, ~ rest
 "bd(3,8,2) hh?0.3"          // euclid, random drop (seeded and repeatable)
+"hh*<8 16> rim(<3 5>,8)"    // patterned arguments: *<..>, /<..>, *[2 4], euclid(<..>,..)
 "[c4,e4,g4] Cmaj7 F#m7b5 a3'm7 c4^0.5"   // chords, chord symbols, ^velocity
 ```
 
-Plain strings work anywhere a sequence is expected, so `s.play(&bass, "c2 ~ c2 eb2")` is valid.
-Builders and combinators:
+Plain strings work anywhere a sequence is expected, so `s.play(&bass, "c2 ~ c2 eb2")` is valid; so do
+chords, progressions and pitches (`s.play(&pad, &chords)`). Every combinator takes `&self`, so you
+build variations of a pattern without ever writing `.clone()`:
 
 ```rust
-p("c4 e4 g4").fast(2).rev().every(4, |p| p.up(12)).swing16(0.2).humanize(0.01, 0.1)
-n("0 2 4 <6 7>").scale(Key::parse("D dorian").unwrap())        // scale degrees
-Pattern::from(chords).arp("updown", 16).legato(0.8)              // arpeggiator
-drums! { bd: "X... x... X... x...", sd: ".... x... .... x...", hh: "x.x.x.x.x.x.x.x." }
-pat![c4 e4 [g4 b4]*2 ~]                                          // unquoted mini-notation
-a & b    // layer        a + b    // one after the other        a * 4    // repeat
+let beat  = drums! { bd: "X... x... X... x...", sd: ".... x... .... x...", hh: "x.x.x.x.x.x.x.x." };
+let fill  = p("~ ~ ~ [sd*4]");
+let groove = beat.last_of(4, |p| p & &fill);                   // fill on every 4th bar
+let hook  = p("c4 e4 g4").fast(2).rev().every(4, |p| p.up(12)).swing16(0.2).humanize(0.01, 0.1);
+let degs  = n("0 2 4 <6 7>").scale("D4 dorian");               // scale degrees
+let arps  = chords.pat().arp("updown", 16).legato(0.8);        // .pat(): strings/chords/progressions → Pattern
+let quick = pat![c4 e4 [g4 b4]*2 ~];                            // unquoted mini-notation
+&beat & "~ ~ ~ cr"    hook + degs    beat * 4                    // layer · one after the other · repeat
 ```
-More: `sometimes/often/rarely`, `off`, `ply`, `struct_`, `mask`, `euclid`, `palindrome`, `iter`,
-`strum`, `chord("m7")`, `triads(key)`, `vels("1 .5")`, `legato/staccato`, `late/early`, `degrade_by`.
+More: `sometimes/often/rarely`, `off`, `ply`/`chop`, `echo`/`stutter`, `struct_`, `mask`, `euclid`,
+`palindrome`, `iter`, `strum`, `chord("m7")`, `triads(key)`, `inv/drop2/open`, `vels("1 .5")`,
+`legato/staccato`, `late/early`, `degrade_by`, `fast_by("<1 2>")`, `.cycle(2.beats())`.
 
 ### Theory
 
 ```rust
 C4.maj7()   A3.min().inv(1)   Chord::parse("Bb/D")   Key::new(A3, Scale::Minor).degree(9)
 prog("ii7 V7 Imaj7", "C major")  voice_lead(key.prog("i VI III VII"))  Scale::Dorian, Scale::Blues, …
+Cs4 == Db4   C4 + 7 == G4   Key::parse("F# dorian")   key.quantize(E4)   Clip::note(0, 1, C4, 0.8)
 ```
 
 ### Instruments
@@ -149,6 +166,12 @@ prog("ii7 V7 Imaj7", "C major")  voice_lead(key.prog("i VI III VII"))  Scale::Do
 | `Sampler` | `piano bass_guitar guitar guitar_fly harp zither`, zones, velocity layers, round-robin, loops, `from_dir`, `one_shot` |
 | `SampleKit` | `acoustic` (wavebase drums), `from_files([(36, "kick.wav"), …])` |
 | your own | implement `Voice` and wrap it in `Poly` (voice allocation, mono/legato/glide) |
+
+Velocity layers crossfade with equal power:
+`Sampler::new().zone(Zone::new("soft.wav", "C4").vel(0.0, 0.5)).zone(Zone::new("hard.wav", "C4").vel(0.5, 1.0)).vel_xfade(0.15)`.
+Before rendering or `--play`, samplers and kits **preload exactly the samples your notes will
+hit**, so nothing is loaded in the audio thread. Git-LFS files are fetched 6 at a time with a
+progress line. `Sampler::preload_all()` loads everything.
 
 The `assets/wavebase` samples are git-LFS pointers. uwu-wave downloads the real files the
 first time a sample is played and caches them in `~/.cache/uwu-wave/lfs`. Set
@@ -181,6 +204,10 @@ song.master().fx(Eq::new().low_cut(30.0)).fx(Limiter::master());
 track.mute(); track.solo(); track.transpose(-12); track.velocity(0.8);
 ```
 Channels are processed in dependency order, and routing cycles are reported as errors.
+An insert can listen to several sidechains (`chain![Ducker::new("kick"), Ducker::new("snare")]`
+gives each ducker its own source). **Plugin delay compensation** is automatic: look-ahead
+limiters and oversampled distortion report their latency, every path to a bus or the master
+is delayed to match, and stems stay sample-aligned with the mix.
 
 ### Arrangement
 

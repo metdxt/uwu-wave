@@ -292,17 +292,17 @@ pub fn find_file(p: &Path) -> Result<PathBuf, Error> {
     if p.is_file() {
         return Ok(p.to_path_buf());
     }
-    if p.is_relative() {
-        if let Some(a) = assets_dir() {
-            let stripped = p.strip_prefix("assets").unwrap_or(p);
-            for cand in [
-                a.join(stripped),
-                a.join("wavebase").join(stripped),
-                a.join("wavebase/base").join(stripped),
-            ] {
-                if cand.is_file() {
-                    return Ok(cand);
-                }
+    if p.is_relative()
+        && let Some(a) = assets_dir()
+    {
+        let stripped = p.strip_prefix("assets").unwrap_or(p);
+        for cand in [
+            a.join(stripped),
+            a.join("wavebase").join(stripped),
+            a.join("wavebase/base").join(stripped),
+        ] {
+            if cand.is_file() {
+                return Ok(cand);
             }
         }
     }
@@ -320,17 +320,17 @@ pub fn find_dir(p: &Path) -> Result<PathBuf, Error> {
     if p.is_dir() {
         return Ok(p.to_path_buf());
     }
-    if p.is_relative() {
-        if let Some(a) = assets_dir() {
-            let stripped = p.strip_prefix("assets").unwrap_or(p);
-            for cand in [
-                a.join(stripped),
-                a.join("wavebase").join(stripped),
-                a.join("wavebase/base").join(stripped),
-            ] {
-                if cand.is_dir() {
-                    return Ok(cand);
-                }
+    if p.is_relative()
+        && let Some(a) = assets_dir()
+    {
+        let stripped = p.strip_prefix("assets").unwrap_or(p);
+        for cand in [
+            a.join(stripped),
+            a.join("wavebase").join(stripped),
+            a.join("wavebase/base").join(stripped),
+        ] {
+            if cand.is_dir() {
+                return Ok(cand);
             }
         }
     }

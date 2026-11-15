@@ -116,7 +116,7 @@ impl Pattern {
 
     // ------------------------------------------------------------- time
 
-    pub(crate) fn fast_rat(self, k: Rat) -> Pattern {
+    pub(crate) fn fast_rat(&self, k: Rat) -> Pattern {
         let kf = k.f64();
         let inner = self.clone();
         self.derive(self.period().div(k), move |q| {
@@ -132,7 +132,7 @@ impl Pattern {
         })
     }
     /// Play `k` times faster (`"a b".fast(2)` = `"a b a b"` per cycle). `k <= 0` gives silence.
-    pub fn fast(self, k: impl Val) -> Pattern {
+    pub fn fast(&self, k: impl Val) -> Pattern {
         let k = k.val() as f64;
         if k <= 0.0 {
             Pattern::silence()
@@ -141,7 +141,7 @@ impl Pattern {
         }
     }
     /// Play `k` times slower (one cycle stretched over `k` cycles).
-    pub fn slow(self, k: impl Val) -> Pattern {
+    pub fn slow(&self, k: impl Val) -> Pattern {
         let k = k.val() as f64;
         if k <= 0.0 {
             Pattern::silence()
@@ -150,7 +150,7 @@ impl Pattern {
         }
     }
     /// Shift later by `cycles` (a rotation: `late(0.25)` = one beat in 4/4).
-    pub fn late(self, cycles: impl Val) -> Pattern {
+    pub fn late(&self, cycles: impl Val) -> Pattern {
         let t = cycles.val() as f64;
         let inner = self.clone();
         self.derive(self.period(), move |q| {
@@ -165,12 +165,12 @@ impl Pattern {
         })
     }
     /// Shift earlier by `cycles`.
-    pub fn early(self, cycles: impl Val) -> Pattern {
+    pub fn early(&self, cycles: impl Val) -> Pattern {
         let t = cycles.val();
         self.late(-t)
     }
     /// Reverse every cycle.
-    pub fn rev(self) -> Pattern {
+    pub fn rev(&self) -> Pattern {
         let inner = self.clone();
         self.derive(self.period(), move |q| {
             let mut out = vec![];
@@ -197,13 +197,13 @@ impl Pattern {
         })
     }
     /// Forwards, then backwards (every odd cycle reversed).
-    pub fn palindrome(self) -> Pattern {
-        let r = self.clone().rev();
+    pub fn palindrome(&self) -> Pattern {
+        let r = self.rev();
         let period = self.period().lcm(Rat::int(2));
         self.cycle_switch(period, r, |c| c.rem_euclid(2) == 1)
     }
     /// Rotate the start point by `1/n` cycle every cycle (`"a b c d".iter(4)`: abcd, bcda, cdab, dabc).
-    pub fn iter(self, n: usize) -> Pattern {
+    pub fn iter(&self, n: usize) -> Pattern {
         let n = n.max(1) as i64;
         let inner = self.clone();
         self.derive(self.period().lcm(Rat::int(n as u64)), move |q| {
@@ -225,7 +225,7 @@ impl Pattern {
         })
     }
     /// Repeat each event `n` times within its own duration (`"a b".ply(2)` = `"[a a] [b b]"`).
-    pub fn ply(self, n: usize) -> Pattern {
+    pub fn ply(&self, n: usize) -> Pattern {
         let n = n.max(1);
         let inner = self.clone();
         let lb = self.lookback();
@@ -248,25 +248,25 @@ impl Pattern {
         })
     }
     /// Loop length `k` times longer (content keeps going: random choices keep varying).
-    pub fn repeat(self, k: usize) -> Pattern {
+    pub fn repeat(&self, k: usize) -> Pattern {
         let p = self.period().mul(Rat::int(k.max(1) as u64));
-        self.with_period(p)
+        self.clone().with_period(p)
     }
     /// Swing: delay the off-beat 8ths (one swing pair per beat). `0` = straight, `1` = full triplet swing.
-    pub fn swing(self, amount: impl Val) -> Pattern {
+    pub fn swing(&self, amount: impl Val) -> Pattern {
         self.swing_impl(amount.val(), None)
     }
     /// 16th-note swing (two pairs per beat).
-    pub fn swing16(self, amount: impl Val) -> Pattern {
+    pub fn swing16(&self, amount: impl Val) -> Pattern {
         self.swing_impl(amount.val(), Some(2.0))
     }
     /// Swing with `pairs` swing pairs per cycle (`swing` uses one per beat).
-    pub fn swing_by(self, amount: impl Val, pairs_per_cycle: impl Val) -> Pattern {
+    pub fn swing_by(&self, amount: impl Val, pairs_per_cycle: impl Val) -> Pattern {
         let n = pairs_per_cycle.val().max(1.0) as f64;
         self.swing_impl(amount.val(), Some(-n))
     }
     /// `per_beat`: Some(+x) = x pairs per beat, Some(-x) = x pairs per cycle, None = 1 per beat.
-    fn swing_impl(self, amount: f32, spec: Option<f64>) -> Pattern {
+    fn swing_impl(&self, amount: f32, spec: Option<f64>) -> Pattern {
         let a = amount.clamp(-0.9, 2.5) as f64;
         let inner = self.clone();
         self.derive(self.period(), move |q| {
@@ -310,7 +310,7 @@ impl Pattern {
     }
     /// Seeded random timing (± `time`, in beats) and velocity (± `vel`) jitter.
     /// `p("hh*8").humanize(0.02, 0.1)`.
-    pub fn humanize(self, time: impl Into<Time>, vel: impl Val) -> Pattern {
+    pub fn humanize(&self, time: impl Into<Time>, vel: impl Val) -> Pattern {
         let tb = time.into().0.abs();
         let va = vel.val().abs();
         let seed = splitmix(self.seed_value() ^ 0x4855_4D41_4E49_5A45);
@@ -338,21 +338,21 @@ impl Pattern {
 
     /// Map every event (timing changes must keep onsets inside the queried window — prefer the
     /// dedicated combinators for that).
-    pub fn map_events(self, f: impl Fn(Event) -> Event + Send + Sync + 'static) -> Pattern {
+    pub fn map_events(&self, f: impl Fn(Event) -> Event + Send + Sync + 'static) -> Pattern {
         let inner = self.clone();
         self.derive(self.period(), move |q| {
             inner.q(q).into_iter().map(&f).collect()
         })
     }
     /// Keep only events matching a predicate: `.filter(|e| e.pitch < 60.0)`.
-    pub fn filter(self, f: impl Fn(&Event) -> bool + Send + Sync + 'static) -> Pattern {
+    pub fn filter(&self, f: impl Fn(&Event) -> bool + Send + Sync + 'static) -> Pattern {
         let inner = self.clone();
         self.derive(self.period(), move |q| {
             inner.q(q).into_iter().filter(|e| f(e)).collect()
         })
     }
     fn flat_map_events(
-        self,
+        &self,
         f: impl Fn(Event, &mut Vec<Event>) + Send + Sync + 'static,
     ) -> Pattern {
         let inner = self.clone();
@@ -365,7 +365,7 @@ impl Pattern {
         })
     }
     /// Transpose by semitones.
-    pub fn transpose(self, st: impl Val) -> Pattern {
+    pub fn transpose(&self, st: impl Val) -> Pattern {
         let st = st.val();
         self.map_events(move |e| Event {
             pitch: e.pitch + st,
@@ -373,25 +373,25 @@ impl Pattern {
         })
     }
     /// Transpose up by semitones.
-    pub fn up(self, st: impl Val) -> Pattern {
+    pub fn up(&self, st: impl Val) -> Pattern {
         self.transpose(st)
     }
     /// Transpose down by semitones.
-    pub fn down(self, st: impl Val) -> Pattern {
+    pub fn down(&self, st: impl Val) -> Pattern {
         let st = st.val();
         self.transpose(-st)
     }
     /// Shift by octaves.
-    pub fn oct(self, n: i32) -> Pattern {
+    pub fn oct(&self, n: i32) -> Pattern {
         self.transpose(12 * n)
     }
     /// Set every velocity.
-    pub fn vel(self, v: impl Val) -> Pattern {
+    pub fn vel(&self, v: impl Val) -> Pattern {
         let v = v.val().clamp(0.0, 1.0);
         self.map_events(move |e| Event { vel: v, ..e })
     }
     /// Multiply velocities (accepts dB too: `.gain(-6.db())`).
-    pub fn gain(self, k: impl Val) -> Pattern {
+    pub fn gain(&self, k: impl Val) -> Pattern {
         let k = k.val();
         self.map_events(move |e| Event {
             vel: (e.vel * k).clamp(0.0, 1.0),
@@ -400,7 +400,7 @@ impl Pattern {
     }
     /// Velocities from a pattern of numbers: `p("hh*8").vels("1 .5 .8 .5")`.
     #[track_caller]
-    pub fn vels(self, vels: &str) -> Pattern {
+    pub fn vels(&self, vels: &str) -> Pattern {
         let vp = Pattern::parse_or_panic(vels);
         let inner = self.clone();
         let lb = vp.lookback();
@@ -427,7 +427,7 @@ impl Pattern {
         })
     }
     /// Scale note lengths (`legato(1.0)` = full step, `2.0` overlaps, `0.5` = half).
-    pub fn legato(self, factor: impl Val) -> Pattern {
+    pub fn legato(&self, factor: impl Val) -> Pattern {
         let f = factor.val().max(0.0) as f64;
         self.map_events(move |e| Event {
             dur: e.dur * f,
@@ -435,14 +435,14 @@ impl Pattern {
         })
     }
     /// Short notes (`legato(0.5)`).
-    pub fn staccato(self) -> Pattern {
+    pub fn staccato(&self) -> Pattern {
         self.legato(0.5)
     }
     /// Resolve scale degrees (0-based, as produced by [`n`](super::n)) into pitches of a key:
     /// `n("0 2 4").scale("C4 minor")` or `.scale(Key::new(C4, Scale::Dorian))`. Fractional
     /// degrees keep their fractional part as a semitone offset.
     #[track_caller]
-    pub fn scale(self, key: impl Into<Key>) -> Pattern {
+    pub fn scale(&self, key: impl Into<Key>) -> Pattern {
         let key = key.into();
         self.map_events(move |e| {
             let d = e.pitch.round();
@@ -454,12 +454,12 @@ impl Pattern {
     }
     /// Alias of [`Pattern::scale`].
     #[track_caller]
-    pub fn in_key(self, key: impl Into<Key>) -> Pattern {
+    pub fn in_key(&self, key: impl Into<Key>) -> Pattern {
         self.scale(key)
     }
     /// Snap every pitch to the nearest note of a key.
     #[track_caller]
-    pub fn quantize(self, key: impl Into<Key>) -> Pattern {
+    pub fn quantize(&self, key: impl Into<Key>) -> Pattern {
         let key = key.into();
         self.map_events(move |e| Event {
             pitch: key.quantize(e.pitch).0,
@@ -468,7 +468,7 @@ impl Pattern {
     }
     /// Turn every note into a chord of the given quality rooted on it: `p("c3 f3 g3").chord("m7")`.
     #[track_caller]
-    pub fn chord(self, quality: &str) -> Pattern {
+    pub fn chord(&self, quality: &str) -> Pattern {
         let iv: Vec<f32> = match crate::theory::Chord::of(crate::theory::Pitch(0.0), quality) {
             Ok(c) => c.pitches(),
             Err(e) => panic!("{e}"),
@@ -482,7 +482,7 @@ impl Pattern {
     }
     /// Turn scale degrees into diatonic triads: `n("0 5 3 4").triads("C3 major")` (I vi IV V).
     #[track_caller]
-    pub fn triads(self, key: impl Into<Key>) -> Pattern {
+    pub fn triads(&self, key: impl Into<Key>) -> Pattern {
         let key = key.into();
         self.flat_map_events(move |e, out| {
             out.extend(
@@ -495,7 +495,7 @@ impl Pattern {
     }
     /// Turn scale degrees into diatonic seventh chords.
     #[track_caller]
-    pub fn sevenths(self, key: impl Into<Key>) -> Pattern {
+    pub fn sevenths(&self, key: impl Into<Key>) -> Pattern {
         let key = key.into();
         self.flat_map_events(move |e, out| {
             out.extend(
@@ -508,7 +508,7 @@ impl Pattern {
     }
     /// Transform every chord (events sharing an onset) with a [`Chord`] function:
     /// `.map_chords(|c| c.drop2())`.
-    pub fn map_chords(self, f: impl Fn(Chord) -> Chord + Send + Sync + 'static) -> Pattern {
+    pub fn map_chords(&self, f: impl Fn(Chord) -> Chord + Send + Sync + 'static) -> Pattern {
         let inner = self.clone();
         self.derive(self.period(), move |q| {
             let mut out = vec![];
@@ -527,19 +527,19 @@ impl Pattern {
         })
     }
     /// Invert every chord `n` times (see [`Chord::inv`]).
-    pub fn inv(self, n: i32) -> Pattern {
+    pub fn inv(&self, n: i32) -> Pattern {
         self.map_chords(move |c| c.inv(n))
     }
     /// Drop-2 voicing for every chord.
-    pub fn drop2(self) -> Pattern {
+    pub fn drop2(&self) -> Pattern {
         self.map_chords(|c| c.drop2())
     }
     /// Open voicing for every chord.
-    pub fn open(self) -> Pattern {
+    pub fn open(&self) -> Pattern {
         self.map_chords(|c| c.open())
     }
     /// Strum chords: each successive note (low → high) starts `time` (beats) later.
-    pub fn strum(self, time: impl Into<Time>) -> Pattern {
+    pub fn strum(&self, time: impl Into<Time>) -> Pattern {
         let tb = time.into().0;
         let inner = self.clone();
         self.derive(self.period(), move |q| {
@@ -566,7 +566,7 @@ impl Pattern {
     /// chord in the given order for as long as the chord lasts.
     /// `p("<Cmaj7 Am7 Dm7 G'7>").arp("updown", 8)`.
     #[track_caller]
-    pub fn arp(self, mode: impl Into<ArpMode>, rate: impl Val) -> Pattern {
+    pub fn arp(&self, mode: impl Into<ArpMode>, rate: impl Val) -> Pattern {
         let mode = mode.into();
         let step = 1.0 / (rate.val().max(1e-3) as f64);
         let seed = splitmix(self.seed_value() ^ 0x4152_5050);
@@ -604,10 +604,97 @@ impl Pattern {
         })
     }
 
+    /// Split each event into `n` equal retriggers (same as [`Pattern::ply`]; named after
+    /// Strudel's `chop` — with notes, chopping and plying are the same thing).
+    pub fn chop(&self, n: usize) -> Pattern {
+        self.ply(n)
+    }
+    /// Tidal's `stut`: `n` copies of every event, each `cycles` later than the previous one, at the
+    /// same velocity (`p("c4 ~ e4 ~").stutter(3, 1.0 / 16.0)`).
+    pub fn stutter(&self, n: usize, cycles: impl Val) -> Pattern {
+        self.echo(n, cycles, 1.0)
+    }
+    /// `n` echoes of every event (including the original), each `cycles` later and with the
+    /// velocity multiplied by `feedback`: `.echo(4, 0.125, 0.6)`.
+    pub fn echo(&self, n: usize, cycles: impl Val, feedback: impl Val) -> Pattern {
+        let t = cycles.val() as f64;
+        let fb = feedback.val();
+        Pattern::layers(
+            (0..n.max(1))
+                .map(|i| {
+                    let g = fb.powi(i as i32);
+                    self.late(t * i as f64).map_events(move |e| Event {
+                        vel: (e.vel * g).clamp(0.0, 1.0),
+                        ..e
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+    /// Speed up by a *pattern* of factors (Strudel `fast("<1 2>")` / mini-notation `a*<1 2>`):
+    /// `p("hh").fast_by("<4 8 [8 16]>")`.
+    #[track_caller]
+    pub fn fast_by(&self, factors: impl Into<Pattern>) -> Pattern {
+        let inner = self.clone();
+        Pattern::patterned(&factors.into(), move |v| inner.fast(v as f32))
+    }
+    /// Slow down by a pattern of factors (`a/<1 2>`).
+    #[track_caller]
+    pub fn slow_by(&self, factors: impl Into<Pattern>) -> Pattern {
+        let inner = self.clone();
+        Pattern::patterned(&factors.into(), move |v| {
+            if v > 0.0 {
+                inner.fast((1.0 / v) as f32)
+            } else {
+                Pattern::silence()
+            }
+        })
+    }
+    /// Build a pattern whose shape is controlled by a pattern of numbers: during each event of
+    /// `control` (value = its pitch number) the events of `make(value)` play. This is how
+    /// patterned mini-notation arguments (`a*<2 3>`, `bd(<3 5>,8)`) work.
+    pub fn patterned(
+        control: &Pattern,
+        make: impl Fn(f64) -> Pattern + Send + Sync + 'static,
+    ) -> Pattern {
+        let probe = control.events_with_bpc(0.0, control.cycles(), crate::time::beats_per_bar());
+        let mut cache: Vec<(f64, Pattern)> = vec![];
+        for e in probe {
+            let v = e.pitch as f64;
+            if !cache.iter().any(|(c, _)| (c - v).abs() < 1e-6) {
+                cache.push((v, make(v)));
+            }
+        }
+        let period = cache
+            .iter()
+            .fold(control.period(), |a, (_, p)| a.lcm(p.period()));
+        let control = control.clone();
+        let lb = control.lookback();
+        let mut out = Pattern::from_query(period, move |q| {
+            let mut out = vec![];
+            for ce in control.q(&q.span(q.from - lb, q.to)) {
+                let lo = q.from.max(ce.start);
+                let hi = q.to.min(ce.end());
+                if hi <= lo {
+                    continue;
+                }
+                let v = ce.pitch as f64;
+                let sub = q.span(lo, hi);
+                match cache.iter().find(|(c, _)| (c - v).abs() < 1e-6) {
+                    Some((_, p)) => out.extend(p.q(&sub).into_iter().filter(|e| sub.has(e.start))),
+                    None => out.extend(make(v).q(&sub).into_iter().filter(|e| sub.has(e.start))),
+                }
+            }
+            out
+        });
+        out.cycle_beats = None;
+        out
+    }
+
     // ------------------------------------------------------------- structure
 
     fn cycle_switch(
-        self,
+        &self,
         period: Rat,
         alt: Pattern,
         pred: impl Fn(i64) -> bool + Send + Sync + 'static,
@@ -624,14 +711,14 @@ impl Pattern {
     }
     /// Apply `f` on every `n`-th cycle, starting with the first (cycles 0, n, 2n...).
     /// `p("c d e f").every(4, |p| p.rev())`.
-    pub fn every(self, n: usize, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn every(&self, n: usize, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         let n = n.max(1) as i64;
         let alt = f(self.clone());
         let period = self.period().lcm(alt.period()).lcm(Rat::int(n as u64));
         self.cycle_switch(period, alt, move |c| c.rem_euclid(n) == 0)
     }
     /// Apply `f` on the last cycle of every `n` (great for fills): `.last_of(4, |p| p.fast(2))`.
-    pub fn last_of(self, n: usize, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn last_of(&self, n: usize, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         let n = n.max(1) as i64;
         let alt = f(self.clone());
         let period = self.period().lcm(alt.period()).lcm(Rat::int(n as u64));
@@ -640,7 +727,7 @@ impl Pattern {
     /// Apply `f` on the cycles where `pred(cycle)` is true. (The loop length can't see the
     /// predicate's period; use [`Pattern::repeat`] if needed.)
     pub fn when_cycle(
-        self,
+        &self,
         pred: impl Fn(i64) -> bool + Send + Sync + 'static,
         f: impl FnOnce(Pattern) -> Pattern,
     ) -> Pattern {
@@ -650,13 +737,14 @@ impl Pattern {
     }
     /// Set the random seed used by the random combinators applied **after** this call
     /// (`sometimes`, `degrade`, `humanize`, random arps).
-    pub fn seed(mut self, seed: u64) -> Pattern {
-        self.seed = seed;
-        self
+    pub fn seed(&self, seed: u64) -> Pattern {
+        let mut out = self.clone();
+        out.seed = seed;
+        out
     }
     /// Apply `f` to a seeded-random `prob` fraction of the events (decided per onset, so chords
     /// stay together; decisions differ from cycle to cycle but are reproducible).
-    pub fn sometimes_by(self, prob: impl Val, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn sometimes_by(&self, prob: impl Val, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         let prob = prob.val();
         let alt = f(self.clone());
         let base = self.clone();
@@ -677,26 +765,26 @@ impl Pattern {
         })
     }
     /// `f` on 50% of the events.
-    pub fn sometimes(self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn sometimes(&self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         self.sometimes_by(0.5, f)
     }
     /// `f` on 75% of the events.
-    pub fn often(self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn often(&self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         self.sometimes_by(0.75, f)
     }
     /// `f` on 25% of the events.
-    pub fn rarely(self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn rarely(&self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         self.sometimes_by(0.25, f)
     }
     /// `f` on 10% of the events.
-    pub fn almost_never(self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn almost_never(&self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         self.sometimes_by(0.1, f)
     }
     /// `f` on 90% of the events.
-    pub fn almost_always(self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn almost_always(&self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         self.sometimes_by(0.9, f)
     }
-    pub(crate) fn degrade_seeded(self, prob: f32, seed: u64) -> Pattern {
+    pub(crate) fn degrade_seeded(&self, prob: f32, seed: u64) -> Pattern {
         let inner = self.clone();
         let seed = splitmix(seed ^ self.seed_value());
         self.derive(self.period(), move |q| {
@@ -708,40 +796,40 @@ impl Pattern {
         })
     }
     /// Randomly drop a `prob` fraction of the events (seeded, per onset).
-    pub fn degrade_by(self, prob: impl Val) -> Pattern {
+    pub fn degrade_by(&self, prob: impl Val) -> Pattern {
         self.degrade_seeded(prob.val(), 0xDE6_2ADE)
     }
     /// Randomly drop half of the events.
-    pub fn degrade(self) -> Pattern {
+    pub fn degrade(&self) -> Pattern {
         self.degrade_by(0.5)
     }
     /// Layer another pattern on top (also the `&` operator).
-    pub fn stack(self, other: impl Into<Pattern>) -> Pattern {
-        Pattern::layers([self, other.into()])
+    pub fn stack(&self, other: impl Into<Pattern>) -> Pattern {
+        Pattern::layers([self.clone(), other.into()])
     }
     /// Play `other` after this pattern's full loop (also the `+` operator).
-    pub fn cat(self, other: impl Into<Pattern>) -> Pattern {
-        Pattern::concat([self, other.into()])
+    pub fn cat(&self, other: impl Into<Pattern>) -> Pattern {
+        Pattern::concat([self.clone(), other.into()])
     }
     /// Stack `f(self)` on top of `self`: `.superimpose(|p| p.up(12).vel(0.4))`.
-    pub fn superimpose(self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+    pub fn superimpose(&self, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
         let o = f(self.clone());
         self.stack(o)
     }
     /// Stack a shifted, transformed copy (Tidal's `off`): `.off(0.125, |p| p.up(7))`.
-    pub fn off(self, cycles: impl Val, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
-        let o = f(self.clone().late(cycles));
+    pub fn off(&self, cycles: impl Val, f: impl FnOnce(Pattern) -> Pattern) -> Pattern {
+        let o = f(self.late(cycles));
         self.stack(o)
     }
     /// Re-rhythm with a structure pattern: each hit (`x`/`1`) takes the notes sounding at that moment.
     /// `p("<c3 eb3>").struct_("x ~ x x ~ x x ~")`.
     #[track_caller]
-    pub fn struct_(self, structure: &str) -> Pattern {
+    pub fn struct_(&self, structure: &str) -> Pattern {
         let st = mini::parse(structure, Mode::Bool).unwrap_or_else(|e| panic!("{e}"));
         self.struct_pat(st)
     }
     /// [`Pattern::struct_`] with a pattern (every event counts as a hit).
-    pub fn struct_pat(self, structure: Pattern) -> Pattern {
+    pub fn struct_pat(&self, structure: Pattern) -> Pattern {
         let inner = self.clone();
         let lb = self.lookback();
         let period = self.period().lcm(structure.period());
@@ -772,7 +860,7 @@ impl Pattern {
     }
     /// Keep only events starting where the mask is on: `.mask("1 1 0 1")` / `.mask("<x ~> x")`.
     #[track_caller]
-    pub fn mask(self, mask: &str) -> Pattern {
+    pub fn mask(&self, mask: &str) -> Pattern {
         let m = mini::parse(mask, Mode::Bool).unwrap_or_else(|e| panic!("{e}"));
         let inner = self.clone();
         let lb = m.lookback();
@@ -790,11 +878,11 @@ impl Pattern {
         })
     }
     /// Euclidean re-rhythm: `k` hits over `n` steps (see [`Pattern::struct_`]).
-    pub fn euclid(self, k: u32, n: u32) -> Pattern {
+    pub fn euclid(&self, k: u32, n: u32) -> Pattern {
         self.euclid_rot(k, n, 0)
     }
     /// Euclidean re-rhythm rotated left by `r` steps.
-    pub fn euclid_rot(self, k: u32, n: u32, r: i32) -> Pattern {
+    pub fn euclid_rot(&self, k: u32, n: u32, r: i32) -> Pattern {
         let st = Pattern::fastcat_w(
             euclid_bools(k, n.max(1), r)
                 .into_iter()
@@ -814,27 +902,34 @@ impl Pattern {
     }
 }
 
-impl<T: Into<Pattern>> Add<T> for Pattern {
-    type Output = Pattern;
-    /// `a + b`: play `b` after `a`.
-    fn add(self, o: T) -> Pattern {
-        self.cat(o)
-    }
+// Operators for every combination of owned / borrowed patterns. The right-hand side can be
+// anything convertible into a pattern (&Pattern, &str, Chord, Pitch, Vec<Chord>...).
+macro_rules! pattern_ops {
+    ($($lhs:ty),*) => {$(
+        impl<T: Into<Pattern>> Add<T> for $lhs {
+            type Output = Pattern;
+            /// `a + b`: play `b` after `a`.
+            fn add(self, o: T) -> Pattern {
+                self.cat(o)
+            }
+        }
+        impl<T: Into<Pattern>> BitAnd<T> for $lhs {
+            type Output = Pattern;
+            /// `a & b`: play together.
+            fn bitand(self, o: T) -> Pattern {
+                self.stack(o)
+            }
+        }
+        impl Mul<usize> for $lhs {
+            type Output = Pattern;
+            /// `a * 4`: a loop four times as long (repeat).
+            fn mul(self, k: usize) -> Pattern {
+                self.repeat(k)
+            }
+        }
+    )*};
 }
-impl<T: Into<Pattern>> BitAnd<T> for Pattern {
-    type Output = Pattern;
-    /// `a & b`: play together.
-    fn bitand(self, o: T) -> Pattern {
-        self.stack(o)
-    }
-}
-impl Mul<usize> for Pattern {
-    type Output = Pattern;
-    /// `a * 4`: a loop four times as long (repeat).
-    fn mul(self, k: usize) -> Pattern {
-        self.repeat(k)
-    }
-}
+pattern_ops!(Pattern, &Pattern);
 
 #[allow(dead_code)]
 fn _assert_send_sync() {

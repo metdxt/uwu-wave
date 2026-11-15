@@ -51,6 +51,12 @@ impl IntoSeq for &Clip {
     }
 }
 
+impl IntoSeq for &Arc<dyn Seq> {
+    fn into_seq(self) -> Arc<dyn Seq> {
+        self.clone()
+    }
+}
+
 impl IntoSeq for Arc<dyn Seq> {
     fn into_seq(self) -> Arc<dyn Seq> {
         self

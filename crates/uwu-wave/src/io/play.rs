@@ -236,7 +236,7 @@ pub fn play(song: &Song, mut opts: RenderOptions, looping: bool) -> Result<Repor
                 if loop_pos == 0 {
                     loops += 1;
                 }
-                if loop_pos % MAX_BLOCK == 0 {
+                if loop_pos.is_multiple_of(MAX_BLOCK) {
                     beats.push_back((rendered, capture_beats[loop_pos / MAX_BLOCK]));
                 }
                 let _ = prod.push(capture[loop_pos]);
@@ -248,10 +248,10 @@ pub fn play(song: &Song, mut opts: RenderOptions, looping: bool) -> Result<Repor
         while beats.len() > 1 && beats[1].0 <= played {
             beats.pop_front();
         }
-        if let Some(&(f0, b0)) = beats.front() {
-            if f0 <= played {
-                shown_beat = b0;
-            }
+        if let Some(&(f0, b0)) = beats.front()
+            && f0 <= played
+        {
+            shown_beat = b0;
         }
         if last_status.elapsed() >= Duration::from_millis(50) {
             last_status = Instant::now();

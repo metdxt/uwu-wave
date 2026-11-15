@@ -7,23 +7,6 @@
 
 use uwu_wave::prelude::*;
 
-/// Step sequencer helper: one char per 16th note. `x` = hit, `X` = accent, `o` = ghost, anything
-/// else = rest.
-fn steps(pattern: &str, pitch: u8) -> Clip {
-    let n = pattern.chars().count();
-    let mut c = Clip::new(beat(n as f64 * 0.25));
-    for (i, ch) in pattern.chars().enumerate() {
-        let vel = match ch {
-            'X' => 1.0,
-            'x' => 0.8,
-            'o' => 0.45,
-            _ => continue,
-        };
-        c = c.note(beat(i as f64 * 0.25), sixteenth(), pitch, vel);
-    }
-    c
-}
-
 /// Notes as (start_beat, length_beats, midi, velocity).
 fn clip(len_beats: f64, notes: &[(f64, f64, i32, f32)]) -> Clip {
     notes
@@ -31,17 +14,6 @@ fn clip(len_beats: f64, notes: &[(f64, f64, i32, f32)]) -> Clip {
         .fold(Clip::new(beat(len_beats)), |c, &(s, d, p, v)| {
             c.note(beat(s), beat(d), p, v)
         })
-}
-
-/// Block chords: each chord lasts `len` beats.
-fn chords(len: f64, prog: &[&[i32]], vel: f32) -> Clip {
-    let mut c = Clip::new(beat(len * prog.len() as f64));
-    for (i, ch) in prog.iter().enumerate() {
-        for &p in ch.iter() {
-            c = c.note(beat(i as f64 * len), beat(len * 0.98), p, vel);
-        }
-    }
-    c
 }
 
 fn main() {
@@ -100,21 +72,12 @@ fn main() {
         )
         .gain(-8.db());
 
-    // ---- material (A minor: Am – F – C – G)
-    let prog: [&[i32]; 4] = [&[57, 60, 64], &[53, 57, 60], &[55, 60, 64], &[55, 59, 62]];
-    let pad_chords = chords(4.0, &prog, 0.7);
-    let stabs = {
-        let mut c = Clip::new(16.beats());
-        for (i, ch) in prog.iter().enumerate() {
-            for off in [0.5, 1.5, 2.5, 3.25] {
-                for &p in ch.iter() {
-                    c = c.note(beat(i as f64 * 4.0 + off), beat(0.2), p + 12, 0.75);
-                }
-            }
-        }
-        c
-    };
-    // 303 line: overlapping notes slide (legato), velocity 1.0 = accent
+    // ---- material (A minor: i – VI – III – VII = Am F C G, voice-led)
+    let key = Key::minor(A3);
+    let chords = voice_lead(key.prog("i VI III VII"));
+    let pads = chords.pat().legato(0.98).vel(0.7);
+    let stabs = chords.pat().oct(1).struct_("~ ~ x ~ ~ ~ x ~ ~ ~ x ~ ~ x ~ ~").legato(0.8).vel(0.75);
+    // the 303 line stays a hand-written Clip: overlapping notes slide (legato), velocity 1.0 = accent
     let acid_line = clip(
         4.0,
         &[
@@ -135,129 +98,67 @@ fn main() {
             (3.75, 0.25, 31, 0.9),
         ],
     );
-    let arp = {
-        let mut c = Clip::new(16.beats());
-        for (i, ch) in prog.iter().enumerate() {
-            let tones = [ch[0], ch[1], ch[2], ch[0] + 12, ch[2], ch[1]];
-            for k in 0..8 {
-                c = c.note(
-                    beat(i as f64 * 4.0 + k as f64 * 0.5),
-                    beat(0.45),
-                    tones[k % tones.len()] + 12,
-                    if k % 4 == 0 { 0.9 } else { 0.65 },
-                );
-            }
-        }
-        c
-    };
-    let ep_comp = clip(
-        16.0,
-        &[
-            (0.0, 1.5, 57, 0.8),
-            (0.0, 1.5, 64, 0.7),
-            (0.0, 1.5, 72, 0.75),
-            (4.5, 1.0, 57, 0.7),
-            (4.5, 1.0, 65, 0.65),
-            (4.5, 1.0, 72, 0.7),
-            (8.0, 1.5, 55, 0.75),
-            (8.0, 1.5, 64, 0.7),
-            (8.0, 1.5, 72, 0.7),
-            (12.5, 1.0, 55, 0.7),
-            (12.5, 1.0, 62, 0.65),
-            (12.5, 1.0, 71, 0.75),
-        ],
-    );
-    let bells = clip(
-        16.0,
-        &[
-            (0.0, 2.0, 76, 0.8),
-            (6.0, 2.0, 72, 0.6),
-            (8.0, 2.0, 79, 0.7),
-            (14.0, 2.0, 74, 0.6),
-        ],
-    );
-    let melody = clip(
-        16.0,
-        &[
-            (0.0, 1.5, 76, 0.9),
-            (1.5, 0.5, 74, 0.7),
-            (2.0, 1.0, 72, 0.8),
-            (3.0, 1.0, 69, 0.7),
-            (4.0, 1.5, 72, 0.9),
-            (5.5, 0.6, 74, 0.7),
-            (6.0, 2.0, 76, 0.85),
-            (8.0, 1.0, 79, 1.0),
-            (9.0, 1.0, 76, 0.8),
-            (10.0, 2.0, 74, 0.85),
-            (12.0, 1.0, 71, 0.8),
-            (13.0, 1.0, 72, 0.8),
-            (14.0, 2.0, 74, 0.9),
-        ],
-    );
-    let subs = clip(
-        16.0,
-        &[
-            (0.0, 3.0, 33, 1.0),
-            (4.0, 3.0, 29, 1.0),
-            (8.0, 3.0, 36, 1.0),
-            (12.0, 2.0, 31, 1.0),
-            (14.0, 1.5, 31, 0.8),
-        ],
-    );
+    let arp = chords.pat().oct(1).arp("updown", 8).vels("0.9 0.65 0.65 0.65").legato(0.9);
+    // e-piano comping: drop-2 voicings on a two-bar rhythm (x@3 = a dotted quarter)
+    let ep_comp = chords.pat().drop2().struct_("<[x@3 ~@5] [~ x@2 ~@5]>");
+    let bells = p("<[e5^0.8 ~] [~ c5^0.6] [g5^0.7 ~] [~ d5^0.6]>");
+    let melody = p("<[e5@3 d5 c5@2 a4@2] [c5@3 d5 e5@4] [g5@2 e5@2 d5@4] [b4@2 c5@2 d5@4]>")
+        .legato(0.95)
+        .humanize(0.01, 0.08);
+    let subs = p("<[a1@3 ~] [f1@3 ~] [c2@3 ~] [g1 g1^0.64]>").legato(0.9);
 
-    let kick = steps("X---x---x---x---", 36);
-    let clap = steps("----x-------x---", 39);
-    let hats = steps("--x---x---x---xo", 42) & steps("o-o-o-o-o-o-o-o-", 44);
-    let open = steps("------------x---", 46);
-    let ride = steps("x-x-x-x-x-x-x-x-", 51);
-    let fill = steps("x-x-x-x-xxxxXXXX", 38) & steps("--------x-x-x-x-", 48);
+    let hats = drums! {
+        hh: "..x. ..x. ..x. ..xo",
+        ph: "o.o. o.o. o.o. o.o.",
+    };
+    let groove = &hats
+        & drums! {
+            bd: "X... x... x... x...",
+            cp: ".... x... .... x...",
+            oh: ".... .... .... x...",
+        };
+    let ride = grid("rd", "x.x. x.x. x.x. x.x.");
+    let fill = drums! {
+        sd: "x.x. x.x. xxxx XXXX",
+        ht: ".... .... x.x. x.x.",
+    };
 
     // ---- arrangement
     song.section("intro", 4.bars(), |s| {
-        s.play(&pad, pad_chords.clone());
-        s.play(&ep, ep_comp.clone());
-        s.play(&drums, hats.clone());
-        s.at(bar(3), &drums, fill.clone());
+        s.play(&pad, &pads);
+        s.play(&ep, &ep_comp);
+        s.play(&drums, &hats);
+        s.at(bar(3), &drums, &fill);
     });
     song.section("groove", 8.bars(), |s| {
-        s.play(
-            &drums,
-            kick.clone() & clap.clone() & hats.clone() & open.clone(),
-        );
-        s.play(&acid, acid_line.clone());
+        s.play(&drums, &groove);
+        s.play(&acid, &acid_line);
         s.ramp_exp(&cutoff, 220.0, 2600.0);
-        s.play(&pad, pad_chords.clone());
-        s.play(&harp, arp.clone());
-        s.play(&organ, stabs.clone());
+        s.play(&pad, &pads);
+        s.play(&harp, &arp);
+        s.play(&organ, &stabs);
     });
     song.section("break", 4.bars(), |s| {
-        s.play(&saws, pad_chords.clone());
-        s.play(&bell, bells.clone());
-        s.play(&harp, arp.clone());
-        s.play(&drums, ride.clone());
-        s.at(bar(3), &drums, fill.clone());
+        s.play(&saws, &pads);
+        s.play(&bell, &bells);
+        s.play(&harp, &arp);
+        s.play(&drums, &ride);
+        s.at(bar(3), &drums, &fill);
     });
     song.section("drop", 8.bars(), |s| {
-        s.play(
-            &drums,
-            kick.clone()
-                & clap.clone()
-                & hats.clone()
-                & open.clone()
-                & steps("x---------------", 49).times(1),
-        );
-        s.play(&acid, acid_line.clone());
+        s.play(&drums, &groove & "<cr ~ ~ ~>");
+        s.play(&acid, &acid_line);
         s.set(&cutoff, 900.0);
-        s.play(&sub, subs.clone());
-        s.play(&saws, stabs.clone());
-        s.play(&ep, ep_comp.clone());
-        s.play(&lead, melody.clone());
-        s.play(&bell, bells.clone());
+        s.play(&sub, &subs);
+        s.play(&saws, &stabs);
+        s.play(&ep, &ep_comp);
+        s.play(&lead, &melody);
+        s.play(&bell, &bells);
     });
     song.section("outro", 2.bars(), |s| {
-        s.once(&pad, chords(8.0, &[&[57, 64, 69, 72]], 0.7));
-        s.once(&bell, clip(1.0, &[(0.0, 1.0, 81, 0.7)]));
-        s.once(&drums, steps("X", 49) & steps("X", 36));
+        s.once(&pad, Chord::new([A3, E4, A4, C5]).pat().slow(2).vel(0.7));
+        s.once(&bell, "a5^0.7 ~ ~ ~");
+        s.once(&drums, "[cr, bd]^1 ~ ~ ~");
     });
 
     song.run();

@@ -83,7 +83,8 @@ fn seed_of(n: &NoteOn) -> u64 {
 // Kick
 // =============================================================================================
 
-/// Kick drum: a sine with a pitch sweep, amp decay, click and drive.
+/// Kick drum: a sine with a pitch sweep, amp decay, click and drive. Track pitch bend retunes
+/// it (great for 808 glides with [`Kick::pitched`]).
 ///
 /// ```
 /// use uwu_wave::prelude::*;
@@ -123,6 +124,7 @@ pub struct Kick {
     vel: f32,
     att: f32,
     on: bool,
+    bend: f32,
 }
 
 impl Kick {
@@ -150,6 +152,7 @@ impl Kick {
             vel: 1.0,
             att: 0.0,
             on: false,
+            bend: 0.0,
         }
     }
     /// Boomy 808: long decay, gentle sweep, soft click.
@@ -241,7 +244,7 @@ impl Voice for Kick {
         self.sr = sr;
         self.clk_lp.set(3500.0, sr);
     }
-    fn start(&mut self, n: &NoteOn, _: &Ctx) {
+    fn start(&mut self, n: &NoteOn, ctx: &Ctx) {
         let sr = self.sr;
         self.f_end = if self.pitched {
             midi_to_hz(n.pitch)
@@ -259,9 +262,10 @@ impl Voice for Kick {
         self.rng = Rng::new(seed_of(n));
         self.att = 0.0;
         self.on = true;
+        self.bend = ctx.bend / 12.0;
     }
     fn release(&mut self, _: &Ctx) {}
-    fn render(&mut self, out: &mut [Frame], _: &Ctx) -> bool {
+    fn render(&mut self, out: &mut [Frame], ctx: &Ctx) -> bool {
         if !self.on {
             return false;
         }
@@ -270,8 +274,11 @@ impl Voice for Kick {
         let sweep = self.sweep * (0.7 + 0.3 * self.vel) / 12.0;
         let dg = 1.0 + 3.0 * self.drive;
         let dnorm = 1.0 / soft_clip(dg);
+        // track pitch bend (octaves here), ramped across the block
+        let db = (ctx.bend / 12.0 - self.bend) / out.len().max(1) as f32;
         for f in out.iter_mut() {
-            let freq = self.f_end * (sweep * self.pe).exp2();
+            self.bend += db;
+            let freq = self.f_end * (sweep * self.pe + self.bend).exp2();
             self.pe *= self.pk;
             self.phase += freq / sr;
             if self.phase >= 1.0 {
@@ -605,7 +612,7 @@ impl Voice for Clap {
         let sr = self.sr;
         let g = self.level * vel_amp(self.vel, 0.85) * 2.2;
         for f in out.iter_mut() {
-            if self.left > 0 && self.t % self.space_n == 0 {
+            if self.left > 0 && self.t.is_multiple_of(self.space_n) {
                 self.left -= 1;
                 self.benv.trigger(0.025, sr);
                 if self.left == 0 {
@@ -921,7 +928,7 @@ impl Voice for Cymbal {
 // Tom
 // =============================================================================================
 
-/// Tom: a sine with a pitch drop, optional noise skin.
+/// Tom: a sine with a pitch drop, optional noise skin. Follows track pitch bend.
 ///
 /// ```
 /// use uwu_wave::prelude::*;
@@ -950,6 +957,7 @@ pub struct Tom {
     vel: f32,
     att: f32,
     on: bool,
+    bend: f32,
 }
 
 impl Tom {
@@ -975,6 +983,7 @@ impl Tom {
             vel: 1.0,
             att: 0.0,
             on: false,
+            bend: 0.0,
         }
     }
     pub fn low() -> Tom {
@@ -1025,7 +1034,7 @@ impl Voice for Tom {
     fn prepare(&mut self, sr: f32) {
         self.sr = sr;
     }
-    fn start(&mut self, n: &NoteOn, _: &Ctx) {
+    fn start(&mut self, n: &NoteOn, ctx: &Ctx) {
         let sr = self.sr;
         self.vel = n.vel;
         self.f0 = if self.pitched {
@@ -1042,17 +1051,20 @@ impl Voice for Tom {
         self.rng = Rng::new(seed_of(n));
         self.att = 0.0;
         self.on = true;
+        self.bend = ctx.bend / 12.0;
     }
     fn release(&mut self, _: &Ctx) {}
-    fn render(&mut self, out: &mut [Frame], _: &Ctx) -> bool {
+    fn render(&mut self, out: &mut [Frame], ctx: &Ctx) -> bool {
         if !self.on {
             return false;
         }
         let sr = self.sr;
         let g = self.level * vel_amp(self.vel, 0.85);
         let sweep = self.sweep * (0.6 + 0.4 * self.vel) / 12.0;
+        let db = (ctx.bend / 12.0 - self.bend) / out.len().max(1) as f32;
         for f in out.iter_mut() {
-            let freq = self.f0 * (sweep * self.pe).exp2();
+            self.bend += db;
+            let freq = self.f0 * (sweep * self.pe + self.bend).exp2();
             self.pe *= self.pk;
             self.phase = (self.phase + freq / sr).fract();
             let body = (TAU * self.phase).sin() * self.amp.next();
@@ -1491,6 +1503,37 @@ mod tests {
             assert!(pk > 0.05 && pk < 1.6, "drum {i} peak {pk}");
             assert!(!p.active(), "drum {i} never ended");
         }
+    }
+
+    #[test]
+    fn bend_retunes_808() {
+        let measure = |bend: f32| {
+            let mut p = Poly::new(Kick::tr808().pitched().sweep(0.0).decay(3.0));
+            let sr = 48_000.0;
+            p.prepare(sr);
+            let mut ctx = Ctx::offline(sr);
+            ctx.bend = bend;
+            p.note_on(
+                &NoteOn {
+                    id: 1,
+                    pitch: 45.0,
+                    vel: 1.0,
+                    dur: 1.0,
+                },
+                &ctx,
+            );
+            let mut out = vec![Frame::ZERO; 24_000];
+            for c in out.chunks_mut(64) {
+                p.render(c, &ctx);
+                ctx = ctx.advanced(c.len());
+            }
+            out[4800..]
+                .windows(2)
+                .filter(|w| (w[0].l <= 0.0) != (w[1].l <= 0.0))
+                .count() as f32
+        };
+        let r = measure(12.0) / measure(0.0);
+        assert!((r - 2.0).abs() < 0.03, "{r}");
     }
 
     #[test]

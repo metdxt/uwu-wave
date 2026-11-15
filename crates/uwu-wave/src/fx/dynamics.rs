@@ -408,6 +408,9 @@ impl Effect for Limiter {
     fn tail(&self) -> f32 {
         self.lookahead + 0.05
     }
+    fn latency(&self) -> usize {
+        self.la.saturating_sub(1)
+    }
     fn name(&self) -> String {
         "limiter".into()
     }
@@ -791,7 +794,7 @@ mod tests {
         let mut c = Compressor::pump().sidechain("kick");
         assert_eq!(Effect::sidechain(&c), Some("kick"));
         let key = |t: usize| {
-            if (t / 12_000) % 2 == 0 {
+            if (t / 12_000).is_multiple_of(2) {
                 Frame::mono(1.0)
             } else {
                 Frame::ZERO
@@ -823,8 +826,8 @@ mod tests {
         let mut l = Limiter::new().lookahead(0.002);
         let out = run(&mut l, sine(0.5), None, 9600);
         let d = 96; // 2 ms at 48k → latency la-1
-        for t in 1000..9000 {
-            assert!((out[t].l - sine(0.5)(t - (d - 1)).l).abs() < 1e-4);
+        for (t, f) in out.iter().enumerate().take(9000).skip(1000) {
+            assert!((f.l - sine(0.5)(t - (d - 1)).l).abs() < 1e-4);
         }
     }
 

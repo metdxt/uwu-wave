@@ -55,14 +55,45 @@ struct SendRt {
     level: Param,
     pre: bool,
     ramp: Ramp,
+    delay: Comp,
 }
+
+/// Plugin-delay-compensation delay (no-op when 0).
+#[derive(Default)]
+struct Comp {
+    buf: Vec<Frame>,
+    pos: usize,
+}
+
+impl Comp {
+    fn new(d: usize) -> Comp {
+        Comp { buf: vec![Frame::ZERO; d], pos: 0 }
+    }
+    #[inline]
+    fn tick(&mut self, x: Frame) -> Frame {
+        if self.buf.is_empty() {
+            return x;
+        }
+        let y = std::mem::replace(&mut self.buf[self.pos], x);
+        self.pos += 1;
+        if self.pos == self.buf.len() {
+            self.pos = 0;
+        }
+        y
+    }
+}
+
+/// Maximum sidechain sources per insert.
+const MAX_SC: usize = 8;
 
 struct Chan {
     name: String,
     kind: ChanKind,
     inst: Option<Box<dyn Instrument>>,
     fx: Vec<Box<dyn Effect>>,
-    sc: Vec<Option<usize>>,
+    sc: Vec<Vec<(String, usize)>>,
+    out_delay: Comp,
+    stem_delay: Comp,
     gain: Param,
     pan: Param,
     bend: Param,
@@ -103,6 +134,11 @@ pub struct Engine {
     stems: Vec<Vec<Frame>>,
     sections: Vec<crate::song::SectionInfo>,
     started: Instant,
+    /// PDC: frames of total master latency still to discard from the output.
+    skip_mix: usize,
+    /// PDC: frames to trim from the start of stems.
+    skip_stems: usize,
+    latency: usize,
 }
 
 /// Enables flush-to-zero / denormals-are-zero for the current thread while alive, so silent
@@ -272,14 +308,19 @@ impl Engine {
             // ---- sidechains
             let mut sc = vec![];
             for f in &c.fx {
-                match f.sidechain() {
-                    None => sc.push(None),
-                    Some(src) => match names.iter().position(|x| x == src) {
-                        Some(j) if j != i => sc.push(Some(j)),
+                let mut srcs = vec![];
+                for src in f.sidechains() {
+                    match names.iter().position(|x| *x == src) {
+                        Some(j) if j != i => {
+                            if !srcs.iter().any(|(n, _): &(String, usize)| *n == src) && srcs.len() < MAX_SC {
+                                srcs.push((src, j));
+                            }
+                        }
                         Some(_) => return Err(Error::Graph(format!("{:?} cannot sidechain itself", c.name))),
-                        None => return Err(Error::Graph(format!("{:?}: sidechain source {src:?} not found", c.name))),
-                    },
+                        None => return Err(Error::Graph(format!("{:?}: sidechain source {src:?} not found (have: {})", c.name, names.join(", ")))),
+                    }
                 }
+                sc.push(srcs);
             }
             let mut inst = c.instrument.take();
             if let Some(inst) = inst.as_mut() {
@@ -301,6 +342,8 @@ impl Engine {
                 inst,
                 fx,
                 sc,
+                out_delay: Comp::default(),
+                stem_delay: Comp::default(),
                 gain: c.gain.clone(),
                 pan: c.pan.clone(),
                 bend: c.bend.clone(),
@@ -308,7 +351,7 @@ impl Engine {
                 gl: Ramp::default(),
                 gr: Ramp::default(),
                 out: if c.kind == ChanKind::Master { None } else { Some(c.output.unwrap_or(0)) },
-                sends: c.sends.iter().map(|s| SendRt { to: s.to, level: s.level.clone(), pre: s.pre, ramp: Ramp::default() }).collect(),
+                sends: c.sends.iter().map(|s| SendRt { to: s.to, level: s.level.clone(), pre: s.pre, ramp: Ramp::default(), delay: Comp::default() }).collect(),
                 events: evs,
                 ev_pos: 0,
                 silenced,
@@ -330,7 +373,7 @@ impl Engine {
                 deps[s.to].push(i);
             }
             for s in c.sc.iter().flatten() {
-                deps[i].push(*s);
+                deps[i].push(s.1);
             }
         }
         let mut order = vec![];
@@ -351,6 +394,51 @@ impl Engine {
         }
         for i in 0..n {
             visit(i, &deps, &mut state, &mut order, &chans)?;
+        }
+
+        // ---- plugin delay compensation
+        let lat: Vec<usize> = chans.iter().map(|c| c.fx.iter().map(|f| f.latency()).sum()).collect();
+        let mut lin = vec![0usize; n];
+        let mut lout = vec![0usize; n];
+        for &i in &order {
+            lout[i] = lin[i] + lat[i];
+            let c = &chans[i];
+            for d in c.out.iter().copied().chain(c.sends.iter().map(|s| s.to)) {
+                lin[d] = lin[d].max(lout[i]);
+            }
+        }
+        // order is topological, but a destination's lin may grow after we visited an earlier
+        // source, so recompute until stable (graphs are tiny)
+        loop {
+            let mut changed = false;
+            for &i in &order {
+                let lo = lin[i] + lat[i];
+                if lo != lout[i] {
+                    lout[i] = lo;
+                    changed = true;
+                }
+                let c = &chans[i];
+                for d in c.out.iter().copied().chain(c.sends.iter().map(|s| s.to)) {
+                    if lout[i] > lin[d] {
+                        lin[d] = lout[i];
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for i in 0..n {
+            let lo = lout[i];
+            let c = &mut chans[i];
+            if let Some(o) = c.out {
+                c.out_delay = Comp::new(lin[o] - lo);
+            }
+            for s in &mut c.sends {
+                s.delay = Comp::new(lin[s.to] - lo);
+            }
+            c.stem_delay = Comp::new(lin[0].saturating_sub(lo));
         }
 
         let tempo = d.tempo.clone();
@@ -393,9 +481,17 @@ impl Engine {
             finished: end_beat <= start_beat,
             sections: d.sections.clone(),
             started: Instant::now(),
+            skip_mix: lout[0],
+            skip_stems: lin[0],
+            latency: lout[0],
         })
     }
 
+    /// Total plugin-delay-compensation latency of the mix in frames (already compensated in the
+    /// output of [`Engine::process`]).
+    pub fn latency(&self) -> usize {
+        self.latency
+    }
     /// Current timeline position.
     pub fn position(&self) -> Clock {
         Clock { beat: self.beat, secs: self.secs }
@@ -419,6 +515,11 @@ impl Engine {
     /// `out.len()` means the song is over.
     pub fn process(&mut self, out: &mut [Frame]) -> usize {
         let _ftz = FlushDenormals::new();
+        while self.skip_mix > 0 && !self.finished {
+            let k = self.skip_mix.min(MAX_BLOCK);
+            self.block(k);
+            self.skip_mix -= k;
+        }
         let mut done = 0;
         while done < out.len() && !self.finished {
             let n = (out.len() - done).min(MAX_BLOCK);
@@ -446,7 +547,11 @@ impl Engine {
                 .iter()
                 .zip(self.stems.iter_mut())
                 .filter(|(c, _)| c.kind != ChanKind::Master)
-                .map(|(c, s)| (c.name.clone(), std::mem::take(s)))
+                .map(|(c, s)| {
+                    let mut s = std::mem::take(s);
+                    s.drain(..self.skip_stems.min(s.len()));
+                    (c.name.clone(), s)
+                })
                 .collect()
         } else {
             vec![]
@@ -480,7 +585,7 @@ impl Engine {
         let sr = self.sr as f32;
         let bps = bpm / 60.0 / sr as f64;
         let beat_end = self.beat + n as f64 * bps;
-        let base = Ctx { sr, clock, bpm, frame: self.frame, sidechain: None, bend: 0.0, modwheel: 0.0 };
+        let base = Ctx { sr, clock, bpm, frame: self.frame, sidechain: None, sidechains: &[], bend: 0.0, modwheel: 0.0 };
         let over = self.beat >= self.end_beat;
 
         if over && !self.flushed {
@@ -534,7 +639,12 @@ impl Engine {
             let b = &mut buf[..n];
             // ---- inserts
             for (fx, sc) in c.fx.iter_mut().zip(c.sc.iter()) {
-                let cx = Ctx { sidechain: sc.map(|s| &outs[s][..n]), ..base };
+                let mut arr: [(&str, &[Frame]); MAX_SC] = [("", &[]); MAX_SC];
+                for (k, (name, src)) in sc.iter().enumerate() {
+                    arr[k] = (name.as_str(), &outs[*src][..n]);
+                }
+                let list = &arr[..sc.len()];
+                let cx = Ctx { sidechain: list.first().map(|x| x.1), sidechains: list, ..base };
                 fx.process(b, &cx);
             }
             // ---- pre-fader sends
@@ -543,7 +653,7 @@ impl Engine {
                 s.ramp.start(lv, n);
                 let dst = &mut inputs[s.to];
                 for (k, f) in b.iter().enumerate() {
-                    dst[k] += *f * s.ramp.next();
+                    dst[k] += s.delay.tick(*f * s.ramp.next());
                 }
             }
             // ---- fader + pan
@@ -561,20 +671,21 @@ impl Engine {
                 s.ramp.start(lv, n);
                 let dst = &mut inputs[s.to];
                 for (k, f) in b.iter().enumerate() {
-                    dst[k] += *f * s.ramp.next();
+                    dst[k] += s.delay.tick(*f * s.ramp.next());
                 }
             }
             // ---- output routing
             if let Some(o) = c.out {
                 let dst = &mut inputs[o];
                 for (k, f) in b.iter().enumerate() {
-                    dst[k] += *f;
+                    dst[k] += c.out_delay.tick(*f);
                 }
             }
             c.meter.process(b);
             outs[ci][..n].copy_from_slice(b);
             if *capture && c.kind != ChanKind::Master {
-                stems[ci].extend_from_slice(b);
+                let sd = &mut c.stem_delay;
+                stems[ci].extend(b.iter().map(|f| sd.tick(*f)));
             }
             for f in buf.iter_mut() {
                 *f = Frame::ZERO;

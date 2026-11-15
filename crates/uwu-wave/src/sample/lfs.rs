@@ -72,6 +72,23 @@ pub fn cache_dir() -> PathBuf {
     base.join("uwu-wave")
 }
 
+static QUIET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// While the returned guard lives, per-file "fetching" notices are suppressed (batch loaders
+/// print their own progress line).
+pub fn quiet() -> QuietGuard {
+    QUIET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    QuietGuard(())
+}
+
+/// See [`quiet`].
+pub struct QuietGuard(());
+impl Drop for QuietGuard {
+    fn drop(&mut self) {
+        QUIET.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Is downloading disabled (`UWU_OFFLINE=1`)?
 pub fn offline() -> bool {
     std::env::var("UWU_OFFLINE")
@@ -101,10 +118,10 @@ pub fn resolve(path: &Path) -> Result<PathBuf, Error> {
         return Ok(path.to_path_buf());
     };
     let cached = cached_path(&ptr);
-    if let Ok(m) = std::fs::metadata(&cached) {
-        if m.len() == ptr.size {
-            return Ok(cached);
-        }
+    if let Ok(m) = std::fs::metadata(&cached)
+        && m.len() == ptr.size
+    {
+        return Ok(cached);
     }
     if offline() {
         return Err(Error::Invalid(format!(
@@ -115,12 +132,20 @@ pub fn resolve(path: &Path) -> Result<PathBuf, Error> {
     let url = url_for(path)?;
     let dir = cached.parent().map(Path::to_path_buf).unwrap_or_default();
     std::fs::create_dir_all(&dir)?;
-    eprintln!(
-        "⇣ fetching {} ({:.1} MB)",
-        rel_display(path),
-        ptr.size as f64 / 1e6
-    );
-    let part = dir.join(format!("{}.{}.part", ptr.oid, std::process::id()));
+    if QUIET.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        eprintln!(
+            "⇣ fetching {} ({:.1} MB)",
+            rel_display(path),
+            ptr.size as f64 / 1e6
+        );
+    }
+    static PART: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let part = dir.join(format!(
+        "{}.{}.{}.part",
+        ptr.oid,
+        std::process::id(),
+        PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let status = std::process::Command::new("curl")
         .arg("-sSfL")
         .arg("--retry")
@@ -233,9 +258,12 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     }
     tail.extend_from_slice(&bit_len.to_be_bytes());
     let mut w = [0u32; 64];
-    for block in data[..full].chunks_exact(64).chain(tail.chunks_exact(64)) {
-        for (i, c) in block.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes([c[0], c[1], c[2], c[3]]);
+    let (body, _) = data[..full].as_chunks::<64>();
+    let (pad, _) = tail.as_chunks::<64>();
+    for block in body.iter().chain(pad.iter()) {
+        let (words, _) = block.as_chunks::<4>();
+        for (i, c) in words.iter().enumerate() {
+            w[i] = u32::from_be_bytes(*c);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);

@@ -26,12 +26,12 @@
 //! | `<a b c>`         | alternation: one per cycle (`a` in cycle 0, `b` in cycle 1, ...)          |
 //! | `[a, b, c]`       | stack (play together); also works at top level: `"c4 e4, c3"`           |
 //! | `{a b c, d e}`    | polymeter: every layer runs at the first layer's step rate (`{..}%4` sets it) |
-//! | `a*2` / `a/2`     | faster / slower (any group: `[a b]*1.5`, `<a b>/2`)                       |
+//! | `a*2` / `a/2`     | faster / slower; any group (`[a b]*1.5`); patterned: `a*<2 3>`, `hh*[2 4]`, `a/<1 2>` |
 //! | `a!3`, `a !`      | replicate the step (3 copies / one more copy)                            |
 //! | `a@3`             | elongate: the step gets weight 3                                         |
 //! | `a _ _`           | tie: each `_` extends the previous step by one step                      |
 //! | `a?` / `a?0.3`    | drop the event randomly (50% / 30%), deterministic, varies per cycle     |
-//! | `bd(3,8)` / `bd(3,8,2)` | euclidean rhythm: 3 hits over 8 steps, rotated left by 2           |
+//! | `bd(3,8)` / `bd(3,8,2)` | euclidean rhythm: 3 hits over 8 steps, rotated left by 2; patterned: `bd(<3 5>,8)` |
 //! | `c4^0.6`          | **velocity** (0..1) for a step or group; default velocity is 0.8         |
 //!
 //! **Atoms**: note names `c4`, `C#4`, `eb3`, `cs4` (`s` = sharp), `a` (no octave = octave 4);
@@ -50,7 +50,10 @@
 //!   [`pat!`](crate::pat)`[c4 e4 [g4 b4]*2 ~]` (no quotes), [`seq!`](crate::seq)`[C4, E4, "g4 b4", C4.maj()]`
 //! * [`drums!`](crate::drums)`{ bd: "x...x...", sd: "....x...", hh: "x.x.x.x." }` and [`grid`]`(pitch, "x..x")`:
 //!   `x` hit, `X` accent, `o` ghost, `1`-`9` velocity levels, `.`/`-`/`~` rest, `_` hold, `|` next cycle.
-//! * operators: `a & b` stack, `a + b` play `b` after `a`, `a * 4` repeat.
+//! * operators: `a & b` stack, `a + b` play `b` after `a`, `a * 4` repeat — for owned and
+//!   borrowed patterns alike (`&beat & "~ ~ ~ cr"`); every combinator takes `&self`, so reusing a
+//!   pattern never needs `.clone()`.
+//! * [`ToPattern`]: `"c4 e4".pat()`, `C4.maj7().pat()`, `chords.pat()`.
 
 mod grid;
 mod mini;
@@ -249,8 +252,8 @@ impl Pattern {
         if items.is_empty() {
             return Pattern::silence();
         }
+        let (items, cb) = Pattern::unify_cycles(items);
         let period = items.iter().fold(items[0].period, |a, p| a.lcm(p.period));
-        let cb = items[0].cycle_beats;
         let mut out =
             Pattern::from_query(period, move |q| items.iter().flat_map(|p| p.q(q)).collect());
         out.cycle_beats = cb;
@@ -262,7 +265,7 @@ impl Pattern {
         if items.is_empty() {
             return Pattern::silence();
         }
-        let cb = items[0].cycle_beats;
+        let (items, cb) = Pattern::unify_cycles(items);
         let period = items
             .iter()
             .skip(1)
@@ -377,12 +380,39 @@ impl Pattern {
     pub fn beats_per_cycle(&self) -> f64 {
         self.cycle_beats.unwrap_or_else(crate::time::beats_per_bar)
     }
-    /// Set the cycle length (default: one bar). `p("c e g").cycle(2.beats())` — set it on the
-    /// final pattern (combining patterns keeps the left operand's cycle length).
-    pub fn cycle(mut self, len: impl Into<crate::time::Time>) -> Pattern {
+    /// Set the cycle length (default: one bar): `p("c e g").cycle(2.beats())` plays three notes
+    /// per two beats. Stacking (`&`) or concatenating (`+`) patterns with different cycle lengths
+    /// keeps every part's timing in beats: the result uses the first explicit cycle length.
+    pub fn cycle(&self, len: impl Into<crate::time::Time>) -> Pattern {
         let b = len.into().0;
-        self.cycle_beats = (b > 0.0).then_some(b);
-        self
+        let mut out = self.clone();
+        out.cycle_beats = (b > 0.0).then_some(b);
+        out
+    }
+    /// This pattern expressed in another cycle length (`None` = one bar), keeping its timing in
+    /// beats. A "bar" is resolved with the meter in effect at construction time.
+    pub(crate) fn rescaled_to(&self, target: Option<f64>) -> Pattern {
+        let bpb = crate::time::beats_per_bar();
+        let src = self.cycle_beats.unwrap_or(bpb);
+        let dst = target.unwrap_or(bpb);
+        let mut out = if (src - dst).abs() < 1e-9 {
+            self.clone()
+        } else {
+            self.fast_rat(Rat::from_f64(dst / src))
+        };
+        out.cycle_beats = target;
+        out
+    }
+    /// The first explicit cycle length among `items`, with every item rescaled into it.
+    fn unify_cycles(items: Vec<Pattern>) -> (Vec<Pattern>, Option<f64>) {
+        let target = items.iter().find_map(|p| p.cycle_beats);
+        if items.iter().all(|p| p.cycle_beats == target) {
+            return (items, target);
+        }
+        (
+            items.iter().map(|p| p.rescaled_to(target)).collect(),
+            target,
+        )
     }
     /// Loop length in cycles (the full alternation period).
     pub fn cycles(&self) -> f64 {
@@ -390,11 +420,10 @@ impl Pattern {
     }
     /// All events whose start lies in `[from, to)` (in cycles), sorted by start then pitch.
     pub fn events(&self, from: f64, to: f64) -> Vec<Event> {
-        let q = Q {
-            from,
-            to,
-            bpc: self.beats_per_cycle(),
-        };
+        self.events_with_bpc(from, to, self.beats_per_cycle())
+    }
+    pub(crate) fn events_with_bpc(&self, from: f64, to: f64, bpc: f64) -> Vec<Event> {
+        let q = Q { from, to, bpc };
         let mut ev: Vec<Event> = self
             .q(&q)
             .into_iter()
@@ -511,6 +540,116 @@ impl From<Vec<Pattern>> for Pattern {
     }
 }
 
+impl From<&Pitch> for Pattern {
+    fn from(p: &Pitch) -> Pattern {
+        Pattern::pure(*p)
+    }
+}
+impl From<&Vec<Pitch>> for Pattern {
+    fn from(v: &Vec<Pitch>) -> Pattern {
+        Pattern::seq(v.clone())
+    }
+}
+impl<const N: usize> From<[Pitch; N]> for Pattern {
+    /// A sequence: `Pattern::from([C4, E4, G4])`.
+    fn from(v: [Pitch; N]) -> Pattern {
+        Pattern::seq(v)
+    }
+}
+impl From<&Vec<Chord>> for Pattern {
+    /// A progression: one chord per cycle.
+    fn from(v: &Vec<Chord>) -> Pattern {
+        Pattern::alt(v.iter())
+    }
+}
+impl From<&[Chord]> for Pattern {
+    /// A progression: one chord per cycle.
+    fn from(v: &[Chord]) -> Pattern {
+        Pattern::alt(v.iter())
+    }
+}
+impl<const N: usize> From<[Chord; N]> for Pattern {
+    /// A progression: one chord per cycle.
+    fn from(v: [Chord; N]) -> Pattern {
+        Pattern::alt(v)
+    }
+}
+impl From<&Vec<Pattern>> for Pattern {
+    /// A sequence of patterns sharing one cycle.
+    fn from(v: &Vec<Pattern>) -> Pattern {
+        Pattern::seq(v.iter())
+    }
+}
+
+/// `.pat()` — turn strings, chords, progressions and pitches into a [`Pattern`] without
+/// ceremony: `"c4 e4".pat().fast(2)`, `C4.maj7().pat().arp("up", 8)`, `chords.pat().open()`.
+///
+/// ```
+/// use uwu_wave::prelude::*;
+/// let chords = prog("i VI III VII", "D4 minor");
+/// let pads = chords.pat().open();
+/// let arp = C4.maj7().pat().arp("up", 8);
+/// let riff = "c4 eb4 g4".pat().fast(2);
+/// # let _ = (pads, arp, riff);
+/// ```
+pub trait ToPattern {
+    fn pat(&self) -> Pattern;
+}
+impl ToPattern for str {
+    /// Parses mini-notation (panics with a caret-pointed message on error).
+    #[track_caller]
+    fn pat(&self) -> Pattern {
+        Pattern::parse_or_panic(self)
+    }
+}
+impl ToPattern for String {
+    #[track_caller]
+    fn pat(&self) -> Pattern {
+        Pattern::parse_or_panic(self)
+    }
+}
+impl ToPattern for Pattern {
+    fn pat(&self) -> Pattern {
+        self.clone()
+    }
+}
+impl ToPattern for Pitch {
+    /// One note per cycle.
+    fn pat(&self) -> Pattern {
+        Pattern::pure(*self)
+    }
+}
+impl ToPattern for Chord {
+    /// The chord held for one cycle.
+    fn pat(&self) -> Pattern {
+        Pattern::from(self)
+    }
+}
+impl ToPattern for [Chord] {
+    /// A progression: one chord per cycle.
+    fn pat(&self) -> Pattern {
+        Pattern::alt(self.iter())
+    }
+}
+impl ToPattern for Vec<Chord> {
+    /// A progression: one chord per cycle.
+    fn pat(&self) -> Pattern {
+        Pattern::alt(self.iter())
+    }
+}
+impl ToPattern for [Pitch] {
+    /// A sequence sharing one cycle.
+    fn pat(&self) -> Pattern {
+        Pattern::seq(self.to_vec())
+    }
+}
+impl ToPattern for Vec<Pitch> {
+    /// A sequence sharing one cycle.
+    fn pat(&self) -> Pattern {
+        Pattern::seq(self.clone())
+    }
+}
+
 impl IntoSeq for &str {
     #[track_caller]
     fn into_seq(self) -> Arc<dyn Seq> {
@@ -548,6 +687,26 @@ impl IntoSeq for Chord {
 }
 impl IntoSeq for Vec<Chord> {
     /// A progression, one chord per cycle (bar).
+    fn into_seq(self) -> Arc<dyn Seq> {
+        Arc::new(Pattern::from(self))
+    }
+}
+impl IntoSeq for &Chord {
+    fn into_seq(self) -> Arc<dyn Seq> {
+        Arc::new(Pattern::from(self))
+    }
+}
+impl IntoSeq for &Vec<Chord> {
+    fn into_seq(self) -> Arc<dyn Seq> {
+        Arc::new(Pattern::from(self))
+    }
+}
+impl IntoSeq for &[Chord] {
+    fn into_seq(self) -> Arc<dyn Seq> {
+        Arc::new(Pattern::from(self))
+    }
+}
+impl IntoSeq for &Vec<Pitch> {
     fn into_seq(self) -> Arc<dyn Seq> {
         Arc::new(Pattern::from(self))
     }
@@ -628,7 +787,7 @@ macro_rules! drums {
 }
 
 pub mod prelude {
-    pub use super::{ArpMode, Pattern, PatternError, degrees, grid, n, p};
+    pub use super::{ArpMode, Pattern, PatternError, ToPattern, degrees, grid, n, p};
     pub use crate::{drums, pat, seq};
 }
 

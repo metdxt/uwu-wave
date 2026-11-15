@@ -15,6 +15,7 @@ struct PluckCfg {
     ring: bool,
     spread: f32,
     vel_sens: f32,
+    mod_bright: f32,
 }
 
 /// The voice behind [`Pluck`]: a Karplus–Strong string with a filtered-noise pluck, pick-position
@@ -37,6 +38,9 @@ pub struct PluckVoice {
     age: usize,
     period_n: usize,
     on: bool,
+    pitch: f32,
+    bend: f32,
+    mw: f32,
 }
 
 impl PluckVoice {
@@ -58,6 +62,24 @@ impl PluckVoice {
     fn loop_gain(&self, t60: f32, hz: f32) -> f32 {
         0.001f32.powf(1.0 / (hz * t60.max(0.01)))
     }
+    /// Effective brightness (config + mod wheel).
+    #[inline]
+    fn brightness(&self, mw: f32) -> f32 {
+        let b = self.cfg.bright.clamp(0.0, 1.0);
+        b + (1.0 - b) * mw.clamp(0.0, 1.0) * self.cfg.mod_bright
+    }
+    /// Loop-filter delay S for a brightness: y = (1-S)·x + S·x[n-1] delays by exactly S samples.
+    #[inline]
+    fn loop_s(b: f32) -> f32 {
+        0.5 * (1.0 - b.clamp(0.0, 1.0)).powf(0.7) * 0.98 + 0.01
+    }
+    /// Delay-line length (samples) for the current pitch + bend and loop delay `s`.
+    #[inline]
+    fn delay_for(&self, bend: f32, s: f32) -> f32 {
+        let hz =
+            midi_to_hz(self.pitch + bend).clamp(self.sr / (self.mask as f32 - 4.0), self.sr * 0.25);
+        self.sr / hz - s
+    }
 }
 
 impl Voice for PluckVoice {
@@ -70,24 +92,27 @@ impl Voice for PluckVoice {
             self.mask = cap - 1;
         }
     }
-    fn start(&mut self, n: &NoteOn, _: &Ctx) {
+    fn start(&mut self, n: &NoteOn, ctx: &Ctx) {
         if self.buf.is_empty() {
             self.prepare(self.sr);
         }
         let sr = self.sr;
         let cfg = self.cfg;
-        let hz = midi_to_hz(n.pitch).clamp(20.0, sr * 0.25);
-        let period = sr / hz;
-        // loop filter: y = (1-S)·x + S·x[n-1] → exactly S samples of delay
-        self.s = 0.5 * (1.0 - cfg.bright.clamp(0.0, 1.0)).powf(0.7) * 0.98 + 0.01;
-        self.delay = period - self.s;
+        self.pitch = n.pitch;
+        self.bend = ctx.bend;
+        self.mw = ctx.modwheel.clamp(0.0, 1.0);
+        let bright = self.brightness(self.mw);
+        self.s = Self::loop_s(bright);
+        self.delay = self.delay_for(self.bend, self.s);
+        let period = self.delay + self.s;
+        let hz = sr / period;
         self.g = self.loop_gain(cfg.decay, hz);
         self.prev = 0.0;
         // ---- excitation: velocity-bright filtered noise, combed by the pick position
         self.rng = Rng::new(n.id.wrapping_mul(0x2545_F491) ^ n.pitch.to_bits() as u64);
         let len = (period.ceil() as usize).min(self.buf.len() - 4);
         self.buf.iter_mut().for_each(|x| *x = 0.0);
-        let b = (cfg.bright * (0.55 + 0.45 * n.vel)).clamp(0.0, 1.0);
+        let b = (bright * (0.55 + 0.45 * n.vel)).clamp(0.0, 1.0);
         let cut = 200.0 + 14_000.0 * b * b;
         let a = 1.0 - (-std::f32::consts::TAU * cut / sr).exp();
         let mut lp = 0.0;
@@ -126,13 +151,27 @@ impl Voice for PluckVoice {
             self.g = self.g.min(self.loop_gain(self.cfg.release, hz));
         }
     }
-    fn render(&mut self, out: &mut [Frame], _: &Ctx) -> bool {
+    fn render(&mut self, out: &mut [Frame], ctx: &Ctx) -> bool {
         if !self.on {
             return false;
         }
-        let (s, g) = (self.s, self.g);
+        let n = out.len().max(1) as f32;
+        let g = self.g;
+        // bend / mod wheel → new delay length and loop filter, glided across the block so the
+        // string retunes smoothly (fractional Hermite read)
+        let (mut s, mut ds, mut dd) = (self.s, 0.0, 0.0);
+        if ctx.bend != self.bend || ctx.modwheel != self.mw {
+            self.bend = ctx.bend;
+            self.mw = ctx.modwheel.clamp(0.0, 1.0);
+            let s_t = Self::loop_s(self.brightness(self.mw));
+            let d_t = self.delay_for(self.bend, s_t);
+            ds = (s_t - s) / n;
+            dd = (d_t - self.delay) / n;
+        }
         let mut pk = 0.0f32;
         for f in out.iter_mut() {
+            s += ds;
+            self.delay += dd;
             let pos = self.w as f32 - self.delay;
             let x = self.read(pos);
             let y = ((1.0 - s) * x + s * self.prev) * g;
@@ -143,6 +182,7 @@ impl Voice for PluckVoice {
             pk = pk.max(o.abs());
             *f += Frame::new(o * self.gl, o * self.gr);
         }
+        self.s = s;
         self.age += out.len();
         if self.age > self.period_n + 64 && pk < 2e-5 {
             self.on = false;
@@ -152,6 +192,9 @@ impl Voice for PluckVoice {
 }
 
 /// Plucked string (Karplus–Strong) with a resonant body filter.
+///
+/// Track pitch bend retunes ringing strings smoothly (the fractional delay glides); the track
+/// mod wheel makes new and ringing strings brighter (see [`Pluck::mod_bright`]).
 ///
 /// ```
 /// use uwu_wave::prelude::*;
@@ -197,6 +240,7 @@ impl Pluck {
                 ring: false,
                 spread: 0.3,
                 vel_sens: 0.7,
+                mod_bright: 0.7,
             },
             sr: 48_000.0,
             buf: vec![],
@@ -213,6 +257,9 @@ impl Pluck {
             age: 0,
             period_n: 0,
             on: false,
+            pitch: 60.0,
+            bend: 0.0,
+            mw: 0.0,
         };
         Pluck {
             poly: Poly::new(v).named("pluck"),
@@ -301,6 +348,11 @@ impl Pluck {
     /// Velocity sensitivity 0..1.
     pub fn velocity(self, sens: f32) -> Pluck {
         self.cfg(|c| c.vel_sens = sens)
+    }
+    /// Mod wheel → brightness: at full wheel the string is this fraction of the way to fully
+    /// bright (default 0.7; 0 ignores the wheel).
+    pub fn mod_bright(self, amount: f32) -> Pluck {
+        self.cfg(|c| c.mod_bright = amount)
     }
     /// Body resonances: up to 4 peaks of (Hz, dB, Q).
     pub fn body(mut self, peaks: &[(f32, f32, f32)]) -> Pluck {
@@ -413,6 +465,68 @@ mod tests {
         let best = (150..300).max_by(|&a, &b| ac(a).total_cmp(&ac(b))).unwrap();
         let hz = 48_000.0 / best as f32;
         assert!((hz - 220.0).abs() < 2.5, "{hz}");
+    }
+
+    #[test]
+    fn bend_retunes_ringing_string() {
+        let sr = 48_000.0;
+        let mut p = Pluck::new().bright(0.5).decay(6.0).no_body();
+        p.prepare(sr);
+        let mut ctx = Ctx::offline(sr);
+        p.note_on(
+            &NoteOn {
+                id: 1,
+                pitch: 57.0,
+                vel: 1.0,
+                dur: 2.0,
+            },
+            &ctx,
+        );
+        let mut out = vec![Frame::ZERO; 48_000];
+        for (i, c) in out.chunks_mut(64).enumerate() {
+            // bend up an octave after 0.25 s (string keeps ringing)
+            ctx.bend = if i * 64 >= 12_000 { 12.0 } else { 0.0 };
+            p.render(c, &ctx);
+            ctx = ctx.advanced(c.len());
+        }
+        let est = |s: &[Frame]| {
+            let s: Vec<f32> = s.iter().map(|f| f.mid()).collect();
+            let ac = |lag: usize| s.iter().zip(&s[lag..]).map(|(a, b)| a * b).sum::<f32>();
+            48_000.0 / (60..300).max_by(|&a, &b| ac(a).total_cmp(&ac(b))).unwrap() as f32
+        };
+        let before = est(&out[2400..12_000]);
+        let after = est(&out[14_400..30_000]);
+        assert!((before - 220.0).abs() < 3.0, "{before}");
+        assert!((after - 440.0).abs() < 8.0, "{after}");
+        assert!(peak(&out[14_400..30_000]) > 0.01);
+    }
+
+    #[test]
+    fn modwheel_brightens() {
+        let hf = |mw: f32| {
+            let sr = 48_000.0;
+            let mut p = Pluck::new().bright(0.3).no_body();
+            p.prepare(sr);
+            let mut ctx = Ctx::offline(sr);
+            ctx.modwheel = mw;
+            p.note_on(
+                &NoteOn {
+                    id: 1,
+                    pitch: 50.0,
+                    vel: 0.8,
+                    dur: 1.0,
+                },
+                &ctx,
+            );
+            let mut out = vec![Frame::ZERO; 24_000];
+            for c in out.chunks_mut(64) {
+                p.render(c, &ctx);
+                ctx = ctx.advanced(c.len());
+            }
+            let d: Vec<_> = out.windows(2).map(|w| w[1] - w[0]).collect();
+            rms(&d) / rms(&out)
+        };
+        assert!(hf(1.0) > hf(0.0) * 1.3, "{} vs {}", hf(1.0), hf(0.0));
     }
 
     #[test]

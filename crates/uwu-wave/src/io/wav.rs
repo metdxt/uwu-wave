@@ -18,10 +18,10 @@ pub fn write_wav(
     audio: &[Frame],
     bits: BitDepth,
 ) -> Result<(), Error> {
-    if let Some(dir) = path.as_ref().parent() {
-        if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir)?;
-        }
+    if let Some(dir) = path.as_ref().parent()
+        && !dir.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir)?;
     }
     let spec = hound::WavSpec {
         channels: 2,

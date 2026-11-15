@@ -167,6 +167,7 @@ pub fn midi_bytes(song: &Song) -> Vec<u8> {
             ev.push((a, 2, vec![0x90 | ch, p as u8, vel]));
             ev.push((b, 1, vec![0x80 | ch, p as u8, 64]));
         }
+        controllers(song, &t, ch, end, &mut ev);
         tracks.push(chunk(ev));
     }
 
@@ -181,12 +182,89 @@ pub fn midi_bytes(song: &Song) -> Vec<u8> {
     out
 }
 
+/// Sample a param every `step` beats over `[0, end]` (seconds integrated along the tempo).
+fn sample_param(song: &Song, p: &crate::param::Param, end: f64, step: f64) -> Vec<(f64, f32)> {
+    let tempo = song.tempo_param();
+    let mut out = vec![];
+    let (mut beat, mut secs) = (0.0f64, 0.0f64);
+    let n = (end.max(0.0) / step).ceil() as usize;
+    for i in 0..=n {
+        let b = i as f64 * step;
+        while beat < b {
+            let bpm = (tempo.at(Clock { beat, secs }) as f64).max(1.0);
+            let db = (b - beat).min(step);
+            secs += db * 60.0 / bpm;
+            beat += db;
+        }
+        out.push((b, p.at(Clock { beat: b, secs })));
+    }
+    out
+}
+
+/// Pitch-bend (with an RPN 0 bend-range setup) and mod-wheel (CC1) events for a track whose
+/// `bend`/`modwheel` params aren't constant zero; sampled every 1/32 beat, duplicates skipped.
+fn controllers(
+    song: &Song,
+    t: &crate::song::Track,
+    ch: u8,
+    end: f64,
+    ev: &mut Vec<(u64, u8, Vec<u8>)>,
+) {
+    const STEP: f64 = 1.0 / 32.0;
+    let bend = t.bend_param();
+    if bend.as_const() != Some(0.0) {
+        let pts = sample_param(song, &bend, end, STEP);
+        let max = pts.iter().fold(0f32, |m, p| m.max(p.1.abs()));
+        let range = if max.is_finite() {
+            (max.ceil() as u8).clamp(1, 24)
+        } else {
+            12
+        };
+        // RPN 0 (pitch-bend sensitivity) = range semitones, then RPN null
+        for (c, v) in [
+            (101, 0),
+            (100, 0),
+            (6, range),
+            (38, 0),
+            (101, 127),
+            (100, 127),
+        ] {
+            ev.push((0, 0, vec![0xb0 | ch, c, v]));
+        }
+        let mut last = None;
+        for (b, st) in pts {
+            let v = (8192.0 + (st / range as f32) * 8191.0)
+                .round()
+                .clamp(0.0, 16383.0) as u16;
+            if last != Some(v) {
+                last = Some(v);
+                ev.push((
+                    tick(b),
+                    0,
+                    vec![0xe0 | ch, (v & 0x7f) as u8, (v >> 7) as u8],
+                ));
+            }
+        }
+    }
+    let wheel = t.modwheel_param();
+    if wheel.as_const() != Some(0.0) {
+        let mut last = None;
+        for (b, m) in sample_param(song, &wheel, end, STEP) {
+            let v = (m.clamp(0.0, 1.0) * 127.0).round() as u8;
+            if last != Some(v) {
+                last = Some(v);
+                ev.push((tick(b), 0, vec![0xb0 | ch, 1, v]));
+            }
+        }
+    }
+}
+
 /// Write the song's notes as a Standard MIDI File.
 pub fn write_midi(song: &Song, path: impl AsRef<Path>) -> Result<(), Error> {
-    if let Some(dir) = path.as_ref().parent() {
-        if !dir.as_os_str().is_empty() {
-            std::fs::create_dir_all(dir)?;
-        }
+    if let Some(dir) = path.as_ref().parent()
+        && !dir.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, midi_bytes(song))?;
     Ok(())
@@ -251,6 +329,85 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn pitch_bend_and_modwheel() {
+        let song = Song::new("bend").bpm(120);
+        let t = song
+            .track("lead", Silence)
+            .bend(crate::auto![0 => 0.0, 4.beats() => -5.0])
+            .modwheel(crate::auto![0 => 0.0, 4.beats() => 1.0]);
+        song.section("a", 1.bars(), |s| {
+            s.once(&t, Clip::new(4.beats()).note(0, 4, 60, 1.0));
+        });
+        let b = midi_bytes(&song);
+        let evs = &parse(&b)[1];
+        // RPN 0 → bend range 5 semitones
+        assert!(evs.iter().any(|e| e.1 == [0xb0, 101, 0]));
+        assert!(evs.iter().any(|e| e.1 == [0xb0, 6, 5]));
+        let bends: Vec<u16> = evs
+            .iter()
+            .filter(|e| e.1[0] == 0xe0)
+            .map(|e| e.1[1] as u16 | (e.1[2] as u16) << 7)
+            .collect();
+        assert!(bends.len() > 50, "{}", bends.len());
+        assert_eq!(bends[0], 8192);
+        assert!(*bends.last().unwrap() <= 2, "{:?}", bends.last());
+        assert!(bends.windows(2).all(|w| w[0] != w[1]), "duplicates skipped");
+        let cc1 = evs.iter().filter(|e| e.1[0] == 0xb0 && e.1[1] == 1).count();
+        assert!(cc1 > 60 && cc1 <= 128, "{cc1}");
+        // a plain track gets no controller events
+        let s2 = Song::new("plain");
+        let p = s2.track("keys", Silence);
+        s2.section("a", 1.bars(), |s| {
+            s.once(&p, Clip::new(4.beats()).note(0, 1, 60, 1.0));
+        });
+        assert!(
+            !parse(&midi_bytes(&s2))[1]
+                .iter()
+                .any(|e| e.1[0] & 0xf0 == 0xe0 || e.1[0] & 0xf0 == 0xb0)
+        );
+    }
+
+    /// Minimal SMF reader for tests: per track, (absolute tick, event bytes).
+    fn parse(b: &[u8]) -> Vec<Vec<(u64, Vec<u8>)>> {
+        let mut tracks = vec![];
+        let mut i = 14;
+        while i + 8 <= b.len() {
+            let len = u32::from_be_bytes([b[i + 4], b[i + 5], b[i + 6], b[i + 7]]) as usize;
+            let body = &b[i + 8..i + 8 + len];
+            let (mut j, mut t, mut evs) = (0, 0u64, vec![]);
+            let vlq = |j: &mut usize| {
+                let mut v = 0u64;
+                loop {
+                    let x = body[*j];
+                    *j += 1;
+                    v = (v << 7) | (x & 0x7f) as u64;
+                    if x & 0x80 == 0 {
+                        return v;
+                    }
+                }
+            };
+            while j < body.len() {
+                t += vlq(&mut j);
+                let st = body[j];
+                let n = match st {
+                    0xff => {
+                        let mut k = j + 2;
+                        let l = vlq(&mut k) as usize;
+                        k + l - j
+                    }
+                    s if s & 0xf0 == 0xc0 || s & 0xf0 == 0xd0 => 2,
+                    _ => 3,
+                };
+                evs.push((t, body[j..j + n].to_vec()));
+                j += n;
+            }
+            tracks.push(evs);
+            i += 8 + len;
+        }
+        tracks
     }
 
     #[test]

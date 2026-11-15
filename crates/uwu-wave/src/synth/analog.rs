@@ -155,6 +155,8 @@ pub(crate) struct SynthCfg {
     vib_delay: f32,
     accent: f32,
     retrig: bool,
+    mod_vib: f32,
+    mod_cut: f32,
 }
 
 impl Default for SynthCfg {
@@ -185,6 +187,8 @@ impl Default for SynthCfg {
             vib_delay: 0.0,
             accent: 0.0,
             retrig: false,
+            mod_vib: 0.5,
+            mod_cut: 0.0,
         }
     }
 }
@@ -291,6 +295,10 @@ pub struct SynthVoice {
     fresh: bool,
     ctrl_left: usize,
     fenv_val: f32,
+    /// Current (per-sample ramped) track pitch bend in semitones.
+    bend: f32,
+    /// Current (ramped) mod wheel 0..1.
+    mw: f32,
 }
 
 impl SynthVoice {
@@ -327,6 +335,8 @@ impl SynthVoice {
             fresh: true,
             ctrl_left: 0,
             fenv_val: 0.0,
+            bend: 0.0,
+            mw: 0.0,
         }
     }
 
@@ -353,14 +363,16 @@ impl SynthVoice {
     #[inline]
     fn next_hz(&mut self, cfg: &SynthCfg, vib_dt: f32) -> f32 {
         self.pitch = self.target + (self.pitch - self.target) * self.glide_k;
-        let mut m = self.pitch;
+        let mut m = self.pitch + self.bend;
         if cfg.pitch_amt != 0.0 {
             m += self.penv * cfg.pitch_amt;
             self.penv *= self.penv_k;
         }
-        if cfg.vib_depth > 0.0 {
+        let mod_depth = self.mw * cfg.mod_vib;
+        if cfg.vib_depth > 0.0 || mod_depth > 0.0 {
             self.vib_amt = (self.vib_amt + self.vib_inc).min(1.0);
-            m += (TAU * self.vib_ph).sin() * cfg.vib_depth * self.vib_amt;
+            let depth = cfg.vib_depth * self.vib_amt + mod_depth;
+            m += (TAU * self.vib_ph).sin() * depth;
             self.vib_ph += vib_dt;
             if self.vib_ph >= 1.0 {
                 self.vib_ph -= 1.0;
@@ -386,10 +398,14 @@ impl Voice for SynthVoice {
         self.sr = sr;
     }
 
-    fn start(&mut self, note: &NoteOn, _ctx: &Ctx) {
+    fn start(&mut self, note: &NoteOn, ctx: &Ctx) {
         let sr = self.sr;
         let cfg = self.cfg;
         let was_idle = self.aenv.is_idle();
+        if was_idle {
+            self.bend = ctx.bend;
+            self.mw = ctx.modwheel.clamp(0.0, 1.0);
+        }
         self.rng = Rng::new(
             note.id
                 .wrapping_mul(0x9E37_79B9)
@@ -471,7 +487,7 @@ impl Voice for SynthVoice {
         self.fenv.gate_off(self.sr);
     }
 
-    fn render(&mut self, out: &mut [Frame], _ctx: &Ctx) -> bool {
+    fn render(&mut self, out: &mut [Frame], ctx: &Ctx) -> bool {
         let n = out.len();
         if n == 0 {
             return !self.aenv.is_idle();
@@ -489,6 +505,9 @@ impl Voice for SynthVoice {
         }
         let dcut = (cut_target - self.cut_log) / n as f32;
         let dgain = (gain_target - self.gain_prev) / n as f32;
+        // pitch bend & mod wheel arrive per block: ramp them per sample (no zipper noise)
+        let dbend = (ctx.bend - self.bend) / n as f32;
+        let dmw = (ctx.modwheel.clamp(0.0, 1.0) - self.mw) / n as f32;
         let q = res_to_q(res);
         let drv = 1.0 + 3.0 * drive;
         let drv_norm = 1.0 / (1.0 + drive).sqrt();
@@ -509,14 +528,20 @@ impl Voice for SynthVoice {
 
         // pitch is static for the whole block unless something modulates it
         let settled = (self.pitch - self.target).abs() < 1e-4;
-        let static_pitch = settled && cfg.pitch_amt == 0.0 && cfg.vib_depth <= 0.0;
+        let static_pitch = settled
+            && cfg.pitch_amt == 0.0
+            && cfg.vib_depth <= 0.0
+            && dbend == 0.0
+            && (cfg.mod_vib == 0.0 || (self.mw == 0.0 && dmw == 0.0));
         if settled {
             self.pitch = self.target;
         }
-        let f_static = midi_to_hz(self.pitch);
+        let f_static = midi_to_hz(self.pitch + self.bend);
 
         for f in out.iter_mut() {
             // ---- pitch
+            self.bend += dbend;
+            self.mw += dmw;
             let f0 = if static_pitch {
                 f_static
             } else {
@@ -571,9 +596,10 @@ impl Voice for SynthVoice {
             // ---- filter
             if self.ctrl_left == 0 {
                 self.ctrl_left = CTRL;
-                let cut = (self.cut_log + env_amt * self.fenv_val + kt + velc)
-                    .exp2()
-                    .clamp(16.0, sr * 0.45);
+                let cut =
+                    (self.cut_log + env_amt * self.fenv_val + kt + velc + self.mw * cfg.mod_cut)
+                        .exp2()
+                        .clamp(16.0, sr * 0.45);
                 match cfg.vcf {
                     Vcf::Off => {}
                     Vcf::Lp24 => {
@@ -643,6 +669,11 @@ impl Voice for SynthVoice {
 /// Velocity scales level (see [`Synth::velocity`]) and, with [`Synth::vel_cutoff`], brightness.
 /// With [`Synth::accent`] (on by default in [`Synth::acid`]) notes with velocity ≥ 0.85 are
 /// accented: louder, with a stronger and snappier filter envelope.
+///
+/// **Pitch bend & mod wheel**: the track's [`bend`](crate::song::Track::bend) (semitones) is added
+/// to every voice on top of note pitch and glide, ramped per sample. The track's
+/// [`modwheel`](crate::song::Track::modwheel) adds vibrato (up to [`Synth::mod_vibrato`]
+/// semitones, default 0.5) and, if [`Synth::mod_cutoff`] is set, opens the filter.
 pub struct Synth {
     poly: Poly<SynthVoice>,
     sh: Arc<SynthShared>,
@@ -858,6 +889,16 @@ impl Synth {
             c.vib_rate = rate;
             c.vib_depth = depth;
         })
+    }
+    /// Mod wheel → vibrato depth in semitones at full wheel (default 0.5; 0 disables).
+    /// Vibrato runs at the [`Synth::vibrato`] rate.
+    pub fn mod_vibrato(self, semitones: f32) -> Synth {
+        self.with(|c| c.mod_vib = semitones)
+    }
+    /// Mod wheel → cutoff in octaves at full wheel (default 0 = off; try 2.0 for a
+    /// wheel-controlled filter opening).
+    pub fn mod_cutoff(self, octaves: f32) -> Synth {
+        self.with(|c| c.mod_cut = octaves)
     }
     /// Fade vibrato in over `secs` after the note starts.
     pub fn vibrato_delay(self, secs: f32) -> Synth {
@@ -1212,6 +1253,117 @@ mod tests {
         let out = play(&mut s, 45.0, 1.0, 1.0, 1.5);
         assert!(finite(&out));
         assert!(peak(&out) > 0.05);
+    }
+
+    /// Render a held note with a constant bend / mod wheel and measure its frequency.
+    fn measure_hz(s: &mut Synth, pitch: f32, bend: f32) -> f32 {
+        let sr = 48_000.0;
+        s.prepare(sr);
+        let mut ctx = Ctx::offline(sr);
+        ctx.bend = bend;
+        s.note_on(
+            &NoteOn {
+                id: 1,
+                pitch,
+                vel: 1.0,
+                dur: 1.0,
+            },
+            &ctx,
+        );
+        let mut out = vec![Frame::ZERO; 48_000];
+        for c in out.chunks_mut(64) {
+            s.render(c, &ctx);
+            ctx = ctx.advanced(c.len());
+        }
+        let seg = &out[9600..];
+        let zc = seg
+            .windows(2)
+            .filter(|w| (w[0].l <= 0.0) != (w[1].l <= 0.0))
+            .count();
+        zc as f32 / 2.0 / (seg.len() as f32 / sr)
+    }
+
+    #[test]
+    fn pitch_bend_octave_doubles_frequency() {
+        let base = measure_hz(&mut Synth::sine(), 57.0, 0.0);
+        let up = measure_hz(&mut Synth::sine(), 57.0, 12.0);
+        let down = measure_hz(&mut Synth::sine(), 57.0, -12.0);
+        assert!((base - 220.0).abs() < 2.0, "{base}");
+        assert!((up / base - 2.0).abs() < 0.02, "{up} / {base}");
+        assert!((down / base - 0.5).abs() < 0.01, "{down} / {base}");
+    }
+
+    #[test]
+    fn bend_ramps_within_a_block() {
+        // jump the bend by an octave between two blocks: the frequency must glide across the
+        // second block instead of stepping at its start
+        let mut s = Synth::sine();
+        s.prepare(48_000.0);
+        let mut ctx = Ctx::offline(48_000.0);
+        s.note_on(
+            &NoteOn {
+                id: 1,
+                pitch: 69.0,
+                vel: 1.0,
+                dur: 1.0,
+            },
+            &ctx,
+        );
+        let mut a = vec![Frame::ZERO; 4096];
+        s.render(&mut a, &ctx);
+        ctx = ctx.advanced(a.len());
+        ctx.bend = 12.0;
+        let mut b = vec![Frame::ZERO; 4096];
+        s.render(&mut b, &ctx);
+        let zc = |x: &[Frame]| {
+            x.windows(2)
+                .filter(|w| (w[0].l <= 0.0) != (w[1].l <= 0.0))
+                .count()
+        };
+        let first = zc(&b[..2048]);
+        let second = zc(&b[2048..]);
+        assert!(second > first, "{first} vs {second}");
+    }
+
+    #[test]
+    fn modwheel_adds_vibrato() {
+        let jitter = |mw: f32| {
+            let mut s = Synth::sine();
+            let sr = 48_000.0;
+            s.prepare(sr);
+            let mut ctx = Ctx::offline(sr);
+            ctx.modwheel = mw;
+            s.note_on(
+                &NoteOn {
+                    id: 1,
+                    pitch: 69.0,
+                    vel: 1.0,
+                    dur: 1.0,
+                },
+                &ctx,
+            );
+            let mut out = vec![Frame::ZERO; 48_000];
+            for c in out.chunks_mut(64) {
+                s.render(c, &ctx);
+                ctx = ctx.advanced(c.len());
+            }
+            // spread of the period lengths = amount of pitch modulation
+            let zs: Vec<usize> = out
+                .windows(2)
+                .enumerate()
+                .filter(|(_, w)| w[0].l <= 0.0 && w[1].l > 0.0)
+                .map(|(i, _)| i)
+                .collect();
+            let periods: Vec<f32> = zs.windows(2).map(|w| (w[1] - w[0]) as f32).collect();
+            let mean = periods.iter().sum::<f32>() / periods.len() as f32;
+            (periods.iter().map(|p| (p - mean).powi(2)).sum::<f32>() / periods.len() as f32).sqrt()
+        };
+        assert!(
+            jitter(1.0) > jitter(0.0) + 1.0,
+            "{} vs {}",
+            jitter(1.0),
+            jitter(0.0)
+        );
     }
 
     #[test]

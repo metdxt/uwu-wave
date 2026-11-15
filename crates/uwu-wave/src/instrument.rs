@@ -160,7 +160,7 @@ impl<V: Voice> Poly<V> {
             return self.new_slot();
         }
         // steal: oldest released voice, else oldest held voice
-        let pick = self
+        self
             .slots
             .iter()
             .enumerate()
@@ -168,8 +168,7 @@ impl<V: Voice> Poly<V> {
             .min_by_key(|(_, s)| s.age)
             .or_else(|| self.slots.iter().enumerate().min_by_key(|(_, s)| s.age))
             .map(|(i, _)| i)
-            .unwrap_or(0);
-        pick
+            .unwrap_or(0)
     }
 }
 

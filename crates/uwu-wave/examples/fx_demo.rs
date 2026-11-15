@@ -128,78 +128,32 @@ impl Voice for Tone {
     }
 }
 
-// ---- clips -------------------------------------------------------------------------------------
+// ---- material (patterns + theory) ----------------------------------------------------------
 
-const ROOTS: [i32; 4] = [45, 41, 48, 43]; // A F C G
-const CHORDS: [[i32; 3]; 4] = [[57, 60, 64], [53, 57, 60], [55, 60, 64], [55, 59, 62]];
-
-fn four_on_the_floor() -> Clip {
-    (0..4).fold(Clip::new(4.beats()), |c, b| c.note(b, 0.5, 36, 1.0))
+/// A minor: i – VI – III – VII (Am F C G), voice-led.
+fn chords() -> Vec<Chord> {
+    voice_lead(Key::minor(A3).prog("i VI III VII"))
 }
-fn hats() -> Clip {
-    (0..16).fold(Clip::new(4.beats()), |c, i| {
-        c.note(
-            i as f64 * 0.25,
-            0.1,
-            42,
-            if i % 4 == 2 { 0.9 } else { 0.35 },
-        )
-    })
+fn four_on_the_floor() -> Pattern {
+    p("bd*4").vel(1.0).legato(0.5)
 }
-fn claps() -> Clip {
-    Clip::new(4.beats())
-        .note(1, 0.5, 39, 0.9)
-        .note(3, 0.5, 39, 1.0)
+fn hats() -> Pattern {
+    p("hh*16").vels("0.35 0.35 0.9 0.35").legato(0.4)
 }
-fn bassline() -> Clip {
-    let mut c = Clip::new(16.beats());
-    for (bar, &r) in ROOTS.iter().enumerate() {
-        for i in 0..8 {
-            if i % 2 == 1 || i == 0 {
-                let p = r - 12 + if i == 7 { 12 } else { 0 };
-                c = c.note(
-                    bar as f64 * 4.0 + i as f64 * 0.5,
-                    0.42,
-                    p,
-                    if i == 0 { 1.0 } else { 0.8 },
-                );
-            }
-        }
-    }
-    c
+fn claps() -> Pattern {
+    p("~ cp^0.9 ~ cp^1").legato(0.5)
 }
-fn pads() -> Clip {
-    let mut c = Clip::new(16.beats());
-    for (bar, ch) in CHORDS.iter().enumerate() {
-        for &p in ch {
-            c = c.note(bar as f64 * 4.0, 3.9, p, 0.8);
-        }
-    }
-    c
+fn bassline() -> Pattern {
+    let roots = p("<a1 f1 c2 g1>");
+    (roots.struct_("x x ~ x ~ x ~ ~") & roots.up(12).struct_("~ ~ ~ ~ ~ ~ ~ x"))
+        .vels("1 .8 .8 .8 .8 .8 .8 .8")
+        .legato(0.84)
 }
-fn arps() -> Clip {
-    let mut c = Clip::new(16.beats());
-    for (bar, ch) in CHORDS.iter().enumerate() {
-        let tones = [
-            ch[0] + 12,
-            ch[1] + 12,
-            ch[2] + 12,
-            ch[1] + 24,
-            ch[2] + 12,
-            ch[0] + 24,
-            ch[1] + 12,
-            ch[2] + 24,
-        ];
-        for i in 0..16 {
-            c = c.note(
-                bar as f64 * 4.0 + i as f64 * 0.25,
-                0.2,
-                tones[(i * 3) % 8],
-                if i % 4 == 0 { 0.9 } else { 0.6 },
-            );
-        }
-    }
-    c
+fn pads() -> Pattern {
+    chords().pat().legato(0.975)
+}
+fn arps() -> Pattern {
+    chords().pat().oct(1).arp("converge", 16).vels("0.9 0.6 0.6 0.6").legato(0.8)
 }
 
 fn main() {
@@ -330,13 +284,7 @@ fn main() {
         s.play(&kick, four_on_the_floor());
         s.play(&bass, bassline());
         s.during(bar(0)..bar(2), &hat, hats());
-        s.once(
-            &pad,
-            Clip::new(4.beats())
-                .note(0, 8, 57, 0.8)
-                .note(0, 8, 60, 0.8)
-                .note(0, 8, 64, 0.8),
-        );
+        s.once(&pad, A3.min().pat().slow(2));
         s.set(&crush_mix, 0.0);
         s.ramp(&shimmer_send, 1.0, 0.0);
         s.ramp_exp(&pad_cut, 900.0, 300.0);

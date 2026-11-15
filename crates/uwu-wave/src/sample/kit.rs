@@ -1,8 +1,8 @@
 //! [`SampleKit`]: a drum kit made of one-shot samples mapped to (GM) drum pitches.
 
 use super::load::find_file;
-use super::sampler::Src;
-use super::voice::{Fader, Play, Region};
+use super::sampler::{Bend, Src, load_all};
+use super::voice::{Fader, Play, Region, warm};
 use crate::ctx::Ctx;
 use crate::dsp::{Frame, Ramp};
 use crate::engine::MAX_BLOCK;
@@ -82,6 +82,7 @@ struct KitVoice {
     env: f32,
     coef: f32,
     age: u64,
+    base: f64,
 }
 
 impl KitVoice {
@@ -89,7 +90,8 @@ impl KitVoice {
         self.play.is_playing() || self.fade.active()
     }
     fn kill(&mut self, secs: f32, sr: f32) {
-        self.fade.begin(&mut self.play, self.amp * self.env, secs, sr);
+        self.fade
+            .begin(&mut self.play, self.amp * self.env, secs, sr);
     }
 }
 
@@ -118,6 +120,7 @@ pub struct SampleKit {
     counter: u64,
     next_choke: u8,
     max_voices: usize,
+    bend: Bend,
     name: String,
 }
 
@@ -138,6 +141,7 @@ impl SampleKit {
             counter: 0,
             next_choke: 1,
             max_voices: 32,
+            bend: Bend::default(),
             name: "sample kit".into(),
         }
     }
@@ -306,13 +310,35 @@ impl Instrument for SampleKit {
             if (p.note as usize) < 128 {
                 self.map[p.note as usize] = i as i16;
             }
-            for s in &p.srcs {
-                s.get(); // kits are small: load (and fetch) everything up front
-            }
         }
         self.voices = vec![KitVoice::default(); self.max_voices];
         self.rr = vec![0; self.pads.len()];
         self.scratch = vec![Frame::ZERO; MAX_BLOCK];
+    }
+    /// Load the pads `notes` hit (all their round-robin samples, in parallel).
+    fn preload(&mut self, notes: &[crate::clip::Note]) {
+        if self.voices.is_empty() {
+            self.prepare(self.sr);
+        }
+        let mut used = vec![false; self.pads.len()];
+        for n in notes {
+            if let Some(pi) = self.lookup(n.pitch.round().clamp(0.0, 127.0) as u8) {
+                used[pi] = true;
+            }
+        }
+        let srcs: Vec<Arc<Src>> = self
+            .pads
+            .iter()
+            .zip(&used)
+            .filter(|(_, u)| **u)
+            .flat_map(|(p, _)| p.srcs.iter().cloned())
+            .collect();
+        load_all(&srcs);
+        for (p, _) in self.pads.iter().zip(&used).filter(|(_, u)| **u) {
+            for s in p.srcs.iter().filter_map(|s| s.get()) {
+                warm(s, 2f64.powf(p.tune as f64 / 12.0), self.sr);
+            }
+        }
     }
     fn note_on(&mut self, note: &NoteOn, ctx: &Ctx) {
         if self.voices.is_empty() {
@@ -352,8 +378,14 @@ impl Instrument for SampleKit {
         if v.play.is_playing() {
             v.kill(0.004, sr);
         }
+        if !self.voices.iter().any(|v| v.alive()) {
+            self.bend.reset(ctx.bend);
+        }
+        let r0 = self.bend.ratio();
+        let v = &mut self.voices[vi];
         let ratio = 2f64.powf(((pad.tune + (note.pitch - key as f32)) / 12.0) as f64);
-        v.play = Play::start(smp, &pad.region, ratio, sr);
+        v.play = Play::start(smp, &pad.region, ratio * r0, sr);
+        v.base = v.play.step() / r0;
         let vel = note.vel.clamp(0.0, 1.0);
         v.amp = pad.gain * ((1.0 - self.vel_sens) + self.vel_sens * vel.powf(self.vel_curve));
         let (gl, gr) = crate::dsp::pan_gains(pad.pan);
@@ -375,6 +407,8 @@ impl Instrument for SampleKit {
         let n = out.len();
         let buf = &mut self.scratch[..n];
         buf.fill(Frame::ZERO);
+        self.bend.block(ctx.bend, n, self.sr);
+        let bend = self.bend;
         for v in self.voices.iter_mut() {
             if !v.alive() {
                 continue;
@@ -384,7 +418,13 @@ impl Instrument for SampleKit {
             if !v.play.is_playing() {
                 continue;
             }
-            for f in buf.iter_mut() {
+            if !bend.moving() {
+                v.play.set_step(v.base * bend.ratio());
+            }
+            for (i, f) in buf.iter_mut().enumerate() {
+                if bend.moving() {
+                    v.play.set_step(v.base * bend.at(i, n));
+                }
                 let Some(x) = v.play.next() else { break };
                 let g = v.amp * v.env;
                 v.env *= v.coef;
@@ -487,6 +527,79 @@ mod tests {
             &ctx,
         );
         assert!(!k.active());
+    }
+
+    #[test]
+    fn preload_loads_used_pads_only() {
+        let dir = std::env::temp_dir().join(format!("uwu-kit-preload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        for name in ["k.wav", "s.wav", "h.wav"] {
+            let mut w = hound::WavWriter::create(dir.join(name), spec).unwrap();
+            for i in 0..500 {
+                w.write_sample((i % 50 * 200) as i16).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let mut k = SampleKit::from_files([
+            (36, dir.join("k.wav")),
+            (38, dir.join("s.wav")),
+            (42, dir.join("h.wav")),
+        ]);
+        k.prepare(48000.0);
+        // 35 falls back to the kick pad
+        k.preload(&[
+            crate::clip::Note::new(0, 1, 35.0, 1.0),
+            crate::clip::Note::new(1, 1, 42.0, 1.0),
+        ]);
+        let loaded: Vec<bool> = k.pads.iter().map(|p| p.srcs[0].is_loaded()).collect();
+        assert_eq!(loaded, vec![true, false, true]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bend_retunes_kit() {
+        let sr = 48000.0;
+        let ctx = Ctx::offline(sr);
+        let n = 48000;
+        let tone = Arc::new(Sample::from_mono(
+            &(0..n)
+                .map(|i| (std::f32::consts::TAU * 200.0 * i as f32 / sr).sin() * 0.5)
+                .collect::<Vec<_>>(),
+            sr,
+        ));
+        let mut k = SampleKit::new().pad_sample(45, tone).velocity(0.0);
+        k.prepare(sr);
+        k.note_on(
+            &NoteOn {
+                id: 1,
+                pitch: 45.0,
+                vel: 1.0,
+                dur: 0.1,
+            },
+            &ctx,
+        );
+        let mut out = vec![Frame::ZERO; 24000];
+        for (b, ch) in out.chunks_mut(64).enumerate() {
+            k.render(
+                ch,
+                &Ctx {
+                    bend: -12.0,
+                    ..ctx.advanced(b * 64)
+                },
+            );
+        }
+        let c = out[4800..]
+            .windows(2)
+            .filter(|w| w[0].l <= 0.0 && w[1].l > 0.0)
+            .count() as f32
+            / ((24000 - 4800) as f32 / sr);
+        assert!((c - 100.0).abs() < 3.0, "{c}");
     }
 
     #[test]

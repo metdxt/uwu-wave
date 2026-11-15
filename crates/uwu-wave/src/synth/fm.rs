@@ -172,6 +172,10 @@ pub struct FmVoice {
     gain_prev: f32,
     index_prev: f32,
     fresh: bool,
+    /// Mod wheel → extra modulation index (fraction of the patch index at full wheel).
+    mod_index: f32,
+    /// Current (ramped) track pitch bend in semitones.
+    bend: f32,
 }
 
 impl FmVoice {
@@ -194,8 +198,11 @@ impl Voice for FmVoice {
     fn prepare(&mut self, sr: f32) {
         self.sr = sr;
     }
-    fn start(&mut self, n: &NoteOn, _: &Ctx) {
+    fn start(&mut self, n: &NoteOn, ctx: &Ctx) {
         let was_idle = self.env.iter().all(|e| e.is_idle());
+        if was_idle {
+            self.bend = ctx.bend;
+        }
         self.pitch = n.pitch;
         self.target = n.pitch;
         self.glide_k = 0.0;
@@ -232,11 +239,13 @@ impl Voice for FmVoice {
             e.gate_off(self.sr);
         }
     }
-    fn render(&mut self, out: &mut [Frame], _: &Ctx) -> bool {
+    fn render(&mut self, out: &mut [Frame], ctx: &Ctx) -> bool {
         let n = out.len();
         let (m, car, fbop) = self.algo.routing();
         let nops = self.n_ops.clamp(1, 4);
-        let index = self.sh.index.get().max(0.0);
+        // mod wheel → brightness (more modulation index); ramped like the index itself
+        let index =
+            self.sh.index.get().max(0.0) * (1.0 + self.mod_index * ctx.modwheel.clamp(0.0, 1.0));
         let gain = self.sh.gain.get().max(0.0);
         if self.fresh {
             self.gain_prev = gain;
@@ -247,16 +256,21 @@ impl Voice for FmVoice {
         let di = (index - self.index_prev) / n.max(1) as f32;
         let sr = self.sr;
         let fb = self.feedback;
-        let mut hz = midi_to_hz(self.pitch);
+        let dbend = (ctx.bend - self.bend) / n.max(1) as f32;
+        let mut hz = midi_to_hz(self.pitch + self.bend);
         let mut inc = [0.0f32; 4];
         for i in 0..nops {
             inc[i] = (hz * self.ops[i].ratio + self.ops[i].detune) / sr;
         }
         let gliding = self.glide_k > 0.0 && (self.pitch - self.target).abs() > 1e-3;
+        let bending = dbend != 0.0;
         for f in out.iter_mut() {
-            if gliding {
-                self.pitch = self.target + (self.pitch - self.target) * self.glide_k;
-                hz = midi_to_hz(self.pitch);
+            if gliding || bending {
+                if gliding {
+                    self.pitch = self.target + (self.pitch - self.target) * self.glide_k;
+                }
+                self.bend += dbend;
+                hz = midi_to_hz(self.pitch + self.bend);
                 for i in 0..nops {
                     inc[i] = (hz * self.ops[i].ratio + self.ops[i].detune) / sr;
                 }
@@ -283,7 +297,7 @@ impl Voice for FmVoice {
                 let y = (TAU * self.ph[i] + pm).sin() * e * lvl;
                 if i == fbop {
                     self.fb_hist[1] = self.fb_hist[0];
-                    self.fb_hist[0] = y / lvl.max(1e-6) * e.min(1.0);
+                    self.fb_hist[0] = y / lvl.max(1e-6);
                 }
                 self.ph[i] += inc[i];
                 self.ph[i] -= self.ph[i].floor();
@@ -299,6 +313,9 @@ impl Voice for FmVoice {
 }
 
 /// 2–4 operator FM synth (DX-style). Pick an [`FmAlgo`], set the operators, done.
+///
+/// Track pitch bend retunes every operator (ramped per sample); the track mod wheel raises
+/// the modulation index (brighter / more bite, see [`Fm::mod_index`]).
 ///
 /// ```
 /// use uwu_wave::prelude::*;
@@ -364,6 +381,8 @@ impl Fm {
             gain_prev: 0.3,
             index_prev: 1.0,
             fresh: true,
+            mod_index: 1.0,
+            bend: 0.0,
         };
         Fm {
             poly: Poly::new(v).named("fm"),
@@ -405,6 +424,12 @@ impl Fm {
     /// Global modulation-index multiplier (brightness, automatable). Default 1.
     pub fn index(mut self, k: impl Into<Param>) -> Fm {
         self.index = k.into();
+        self
+    }
+    /// Mod wheel → brightness: at full wheel the modulation index is multiplied by
+    /// `1 + amount` (default 1.0, i.e. doubled). 0 ignores the wheel.
+    pub fn mod_index(mut self, amount: f32) -> Fm {
+        self.v().mod_index = amount;
         self
     }
     /// Output gain (automatable).
@@ -617,6 +642,57 @@ mod tests {
             rms(&d)
         };
         assert!(hf(1.5) > hf(0.1) * 1.5);
+    }
+
+    fn render_ctx(f: &mut Fm, bend: f32, mw: f32) -> Vec<Frame> {
+        let sr = 48_000.0;
+        f.prepare(sr);
+        let mut ctx = Ctx::offline(sr);
+        ctx.bend = bend;
+        ctx.modwheel = mw;
+        f.note_on(
+            &NoteOn {
+                id: 1,
+                pitch: 57.0,
+                vel: 1.0,
+                dur: 1.0,
+            },
+            &ctx,
+        );
+        let mut out = vec![Frame::ZERO; 24_000];
+        for c in out.chunks_mut(64) {
+            f.render(c, &ctx);
+            ctx = ctx.advanced(c.len());
+        }
+        out
+    }
+
+    #[test]
+    fn bend_and_modwheel() {
+        // a pure carrier: bend +12 doubles the frequency
+        let sine = || {
+            Fm::new(FmAlgo::Stack)
+                .ops(1)
+                .op(1, FmOp::new(1.0).adsr(0.001, 1.0, 1.0, 0.1))
+        };
+        let zc = |o: &[Frame]| {
+            o[4800..]
+                .windows(2)
+                .filter(|w| (w[0].l <= 0.0) != (w[1].l <= 0.0))
+                .count() as f32
+        };
+        let ratio =
+            zc(&render_ctx(&mut sine(), 12.0, 0.0)) / zc(&render_ctx(&mut sine(), 0.0, 0.0));
+        assert!((ratio - 2.0).abs() < 0.02, "{ratio}");
+        // mod wheel makes it brighter
+        let hf = |o: Vec<Frame>| {
+            let d: Vec<_> = o.windows(2).map(|w| w[1] - w[0]).collect();
+            rms(&d) / rms(&o)
+        };
+        assert!(
+            hf(render_ctx(&mut Fm::epiano(), 0.0, 1.0))
+                > hf(render_ctx(&mut Fm::epiano(), 0.0, 0.0)) * 1.1
+        );
     }
 
     #[test]

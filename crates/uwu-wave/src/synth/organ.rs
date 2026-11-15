@@ -18,7 +18,15 @@ struct OrganCfg {
     perc_decay: f32,
     click: f32,
     vel_sens: f32,
+    /// Mod wheel → vibrato (used when there is no rotary speaker).
+    mw_vibrato: bool,
 }
+
+/// Rotary horn speed (Hz) the mod wheel crossfades towards.
+const ROTARY_FAST: f32 = 6.7;
+/// Mod-wheel vibrato (no rotary): rate (Hz) and depth at full wheel (semitones).
+const MW_VIB_RATE: f32 = 6.9;
+const MW_VIB_DEPTH: f32 = 0.3;
 
 /// The voice behind [`Organ`]: nine sine drawbars computed with a Chebyshev recurrence.
 #[derive(Clone)]
@@ -38,6 +46,10 @@ pub struct OrganVoice {
     click_lp: OnePole,
     rng: Rng,
     amp: f32,
+    pitch: f32,
+    bend: f32,
+    mw: f32,
+    vib_ph: f32,
 }
 
 impl Voice for OrganVoice {
@@ -45,9 +57,14 @@ impl Voice for OrganVoice {
         self.sr = sr;
         self.click_lp.set(5000.0, sr);
     }
-    fn start(&mut self, n: &NoteOn, _: &Ctx) {
+    fn start(&mut self, n: &NoteOn, ctx: &Ctx) {
         let sr = self.sr;
-        let f16 = midi_to_hz(n.pitch) * 0.5;
+        self.pitch = n.pitch;
+        if self.env.is_idle() {
+            self.bend = ctx.bend;
+            self.mw = ctx.modwheel.clamp(0.0, 1.0);
+        }
+        let f16 = midi_to_hz(n.pitch + self.bend) * 0.5;
         self.inc = f16 / sr;
         if self.env.is_idle() {
             self.phase = 0.0;
@@ -85,11 +102,36 @@ impl Voice for OrganVoice {
     fn release(&mut self, _: &Ctx) {
         self.env.gate_off(self.sr);
     }
-    fn render(&mut self, out: &mut [Frame], _: &Ctx) -> bool {
+    fn render(&mut self, out: &mut [Frame], ctx: &Ctx) -> bool {
         let ph_h = self.cfg.perc_harm.min(16);
+        let n = out.len().max(1) as f32;
+        let dbend = (ctx.bend - self.bend) / n;
+        let mw_t = if self.cfg.mw_vibrato {
+            ctx.modwheel.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let dmw = (mw_t - self.mw) / n;
+        let vib_dt = MW_VIB_RATE / self.sr;
+        // semitones → linear frequency deviation (small-angle approximation of 2^(x/12))
+        let vib_k = MW_VIB_DEPTH * std::f32::consts::LN_2 / 12.0;
+        let half_over_sr = 0.5 / self.sr;
         for f in out.iter_mut() {
+            if dbend != 0.0 {
+                self.bend += dbend;
+                self.inc = midi_to_hz(self.pitch + self.bend) * half_over_sr;
+            }
+            self.mw += dmw;
+            let mut inc = self.inc;
+            if self.mw > 0.0 {
+                inc *= 1.0 + vib_k * self.mw * (TAU * self.vib_ph).sin();
+                self.vib_ph += vib_dt;
+                if self.vib_ph >= 1.0 {
+                    self.vib_ph -= 1.0;
+                }
+            }
             let th = TAU * self.phase;
-            self.phase += self.inc;
+            self.phase += inc;
             if self.phase >= 1.0 {
                 self.phase -= 1.0;
             }
@@ -131,7 +173,11 @@ struct Rotary {
     xover: OnePole,
 }
 
-/// Drawbar organ. Registrations are written like on a Hammond: `Organ::new("888000000")`.
+/// Drawbar organ. Track pitch bend retunes all voices (ramped per sample); the track mod wheel
+/// speeds the rotary speaker up towards fast (≈6.7 Hz, with rotor inertia), or — with
+/// [`Organ::no_rotary`] — adds a 6.9 Hz scanner-style vibrato.
+///
+/// Registrations are written like on a Hammond: `Organ::new("888000000")`.
 ///
 /// ```
 /// use uwu_wave::prelude::*;
@@ -188,6 +234,7 @@ impl Organ {
                 perc_decay: 0.3,
                 click: 0.08,
                 vel_sens: 0.25,
+                mw_vibrato: false,
             },
             sr: 48_000.0,
             phase: 0.0,
@@ -203,6 +250,10 @@ impl Organ {
             click_lp: OnePole::default(),
             rng: Rng::new(3),
             amp: 1.0,
+            pitch: 60.0,
+            bend: 0.0,
+            mw: 0.0,
+            vib_ph: 0.0,
         };
         Organ {
             poly: Poly::new(v).named("organ"),
@@ -278,6 +329,7 @@ impl Organ {
     /// accelerates/brakes with realistic inertia.
     pub fn rotary(mut self, hz: impl Into<Param>) -> Organ {
         self.rotary = Some(hz.into());
+        self.poly.proto_mut().cfg.mw_vibrato = false;
         self
     }
     pub fn rotary_slow(self) -> Organ {
@@ -289,6 +341,7 @@ impl Organ {
     /// Bypass the rotary speaker.
     pub fn no_rotary(mut self) -> Organ {
         self.rotary = None;
+        self.poly.proto_mut().cfg.mw_vibrato = true;
         self
     }
     /// Output gain (automatable).
@@ -338,10 +391,16 @@ impl Instrument for Organ {
             self.ramp.start(cx.p(&self.gain), n);
             let dg = 1.0 + 2.5 * self.drive;
             let dnorm = 1.0 / soft_clip(dg);
+            // mod wheel crossfades the rotor from its set speed to fast (the classic
+            // half-moon switch, but continuous); inertia below makes it spin up/down naturally
+            let mw = cx.modwheel.clamp(0.0, 1.0);
             let target = self
                 .rotary
                 .as_ref()
-                .map(|p| cx.p(p).clamp(0.0, 12.0))
+                .map(|p| {
+                    let slow = cx.p(p).clamp(0.0, 12.0);
+                    slow + (ROTARY_FAST - slow) * mw
+                })
                 .unwrap_or(0.0);
             let kh = (-1.0 / (0.6 * sr)).exp();
             let kd = (-1.0 / (1.8 * sr)).exp();
@@ -407,6 +466,72 @@ mod tests {
             assert!(pk > 0.03 && pk < 1.5, "{name}: {pk}");
             assert!(!o.active(), "{name}");
         }
+    }
+
+    #[test]
+    fn bend_retunes_organ() {
+        let sr = 48_000.0;
+        let mut o = Organ::new("008000000").no_rotary().click(0.0);
+        o.prepare(sr);
+        let mut ctx = Ctx::offline(sr);
+        ctx.bend = 12.0;
+        o.note_on(
+            &NoteOn {
+                id: 1,
+                pitch: 57.0,
+                vel: 1.0,
+                dur: 1.0,
+            },
+            &ctx,
+        );
+        let mut out = vec![Frame::ZERO; 24_000];
+        for c in out.chunks_mut(64) {
+            o.render(c, &ctx);
+            ctx = ctx.advanced(c.len());
+        }
+        let s = &out[4800..];
+        let zc = s
+            .windows(2)
+            .filter(|w| (w[0].l <= 0.0) != (w[1].l <= 0.0))
+            .count();
+        let hz = zc as f32 / 2.0 / (s.len() as f32 / sr);
+        assert!((hz - 440.0).abs() < 5.0, "{hz}");
+    }
+
+    #[test]
+    fn modwheel_speeds_up_rotary() {
+        // amplitude modulation depth of the horn grows with rotor speed within a short window
+        let am = |mw: f32| {
+            let sr = 48_000.0;
+            let mut o = Organ::new("000000008").rotary_slow().click(0.0);
+            o.prepare(sr);
+            let mut ctx = Ctx::offline(sr);
+            ctx.modwheel = mw;
+            o.note_on(
+                &NoteOn {
+                    id: 1,
+                    pitch: 72.0,
+                    vel: 1.0,
+                    dur: 4.0,
+                },
+                &ctx,
+            );
+            let mut out = vec![Frame::ZERO; 96_000];
+            for c in out.chunks_mut(64) {
+                o.render(c, &ctx);
+                ctx = ctx.advanced(c.len());
+            }
+            // count envelope wiggles of the left channel over the last second
+            let env: Vec<f32> = out[48_000..]
+                .chunks(480)
+                .map(|c| c.iter().map(|f| f.l.abs()).fold(0.0, f32::max))
+                .collect();
+            let mean = env.iter().sum::<f32>() / env.len() as f32;
+            env.windows(2)
+                .filter(|w| (w[0] < mean) != (w[1] < mean))
+                .count()
+        };
+        assert!(am(1.0) > am(0.0) + 4, "{} vs {}", am(1.0), am(0.0));
     }
 
     #[test]
