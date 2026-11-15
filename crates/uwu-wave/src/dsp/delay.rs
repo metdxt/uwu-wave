@@ -36,7 +36,8 @@ impl DelayLine {
     pub fn tap(&self, d: usize) -> f32 {
         let n = self.buf.len();
         let d = d.min(n - 1);
-        self.buf[(self.pos + n - d) % n]
+        let i = if self.pos >= d { self.pos - d } else { self.pos + n - d };
+        self.buf[i]
     }
     /// Linear-interpolated fractional read.
     #[inline]

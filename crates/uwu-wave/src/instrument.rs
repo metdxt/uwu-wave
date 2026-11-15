@@ -173,6 +173,11 @@ impl<V: Voice> Instrument for Poly<V> {
         for s in &mut self.slots {
             s.voice.prepare(sr);
         }
+        // pre-create voices so note-ons never allocate
+        let want = if self.mode == PolyMode::Poly { self.max.min(64) } else { 1 };
+        while self.slots.len() < want {
+            self.new_slot();
+        }
     }
     fn note_on(&mut self, note: &NoteOn, ctx: &Ctx) {
         self.counter += 1;

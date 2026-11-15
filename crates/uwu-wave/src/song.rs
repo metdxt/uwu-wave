@@ -123,33 +123,33 @@ impl Song {
         })))
     }
     /// Tempo: a constant (`.bpm(128)`) or automation (`.bpm(auto![0 => 90, bar(16) => 140])`).
-    pub fn bpm(self, bpm: impl Into<Param>) -> Song {
+    pub fn bpm(&self, bpm: impl Into<Param>) -> Song {
         self.0.borrow_mut().tempo = bpm.into();
-        self
+        self.clone()
     }
     /// Alias of [`Song::bpm`].
-    pub fn tempo(self, bpm: impl Into<Param>) -> Song {
+    pub fn tempo(&self, bpm: impl Into<Param>) -> Song {
         self.bpm(bpm)
     }
     /// Time signature. Call it before creating bar positions.
-    pub fn meter(self, num: u32, den: u32) -> Song {
+    pub fn meter(&self, num: u32, den: u32) -> Song {
         set_meter(num, den);
         self.0.borrow_mut().meter = (num, den);
-        self
+        self.clone()
     }
-    pub fn sample_rate(self, sr: u32) -> Song {
+    pub fn sample_rate(&self, sr: u32) -> Song {
         self.0.borrow_mut().sr = sr;
-        self
+        self.clone()
     }
     /// Force the song length (otherwise: end of the last section/clip).
-    pub fn length(self, t: impl Into<Time>) -> Song {
+    pub fn length(&self, t: impl Into<Time>) -> Song {
         self.0.borrow_mut().length = Some(t.into());
-        self
+        self.clone()
     }
     /// Maximum seconds of reverb/release tail rendered after the end (default 12; stops early on silence).
-    pub fn tail(self, secs: f32) -> Song {
+    pub fn tail(&self, secs: f32) -> Song {
         self.0.borrow_mut().max_tail = secs;
-        self
+        self.clone()
     }
     pub fn name(&self) -> String {
         self.0.borrow().name.clone()
@@ -279,6 +279,7 @@ impl Song {
         crate::io::cli::run(self)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn data(&self) -> std::cell::Ref<'_, SongData> {
         self.0.borrow()
     }
@@ -318,6 +319,7 @@ impl Track {
     pub fn kind(&self) -> ChanKind {
         self.song.borrow().chans[self.idx].kind
     }
+    #[allow(dead_code)]
     pub(crate) fn index(&self) -> usize {
         self.idx
     }

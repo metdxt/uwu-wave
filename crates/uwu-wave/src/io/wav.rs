@@ -1,7 +1,7 @@
 //! WAV writing.
 
-use crate::dsp::{Frame, Rng};
 use crate::Error;
+use crate::dsp::{Frame, Rng};
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,7 +12,12 @@ pub enum BitDepth {
 }
 
 /// Write stereo audio. Integer formats get TPDF dither and hard clipping at full scale.
-pub fn write_wav(path: impl AsRef<Path>, sr: u32, audio: &[Frame], bits: BitDepth) -> Result<(), Error> {
+pub fn write_wav(
+    path: impl AsRef<Path>,
+    sr: u32,
+    audio: &[Frame],
+    bits: BitDepth,
+) -> Result<(), Error> {
     if let Some(dir) = path.as_ref().parent() {
         if !dir.as_os_str().is_empty() {
             std::fs::create_dir_all(dir)?;
@@ -26,7 +31,11 @@ pub fn write_wav(path: impl AsRef<Path>, sr: u32, audio: &[Frame], bits: BitDept
             BitDepth::Int24 => 24,
             BitDepth::Float32 => 32,
         },
-        sample_format: if bits == BitDepth::Float32 { hound::SampleFormat::Float } else { hound::SampleFormat::Int },
+        sample_format: if bits == BitDepth::Float32 {
+            hound::SampleFormat::Float
+        } else {
+            hound::SampleFormat::Int
+        },
     };
     let mut w = hound::WavWriter::create(path, spec)?;
     match bits {
@@ -37,7 +46,11 @@ pub fn write_wav(path: impl AsRef<Path>, sr: u32, audio: &[Frame], bits: BitDept
             }
         }
         BitDepth::Int16 | BitDepth::Int24 => {
-            let max = if bits == BitDepth::Int16 { 32767.0 } else { 8_388_607.0 };
+            let max = if bits == BitDepth::Int16 {
+                32767.0
+            } else {
+                8_388_607.0
+            };
             let mut rng = Rng::new(7);
             for f in audio {
                 for x in [f.l, f.r] {

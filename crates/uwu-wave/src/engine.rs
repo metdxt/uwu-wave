@@ -103,6 +103,44 @@ pub struct Engine {
     started: Instant,
 }
 
+/// Enables flush-to-zero / denormals-are-zero for the current thread while alive, so silent
+/// feedback paths (reverbs, filters, plucked strings) never fall into slow denormal arithmetic.
+struct FlushDenormals {
+    #[cfg(target_arch = "x86_64")]
+    saved: u32,
+}
+
+impl FlushDenormals {
+    fn new() -> FlushDenormals {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let mut csr: u32 = 0;
+            // SAFETY: stmxcsr/ldmxcsr only read/write the SSE control register; FTZ (bit 15) and
+            // DAZ (bit 6) are supported by every x86_64 CPU.
+            unsafe {
+                std::arch::asm!("stmxcsr [{}]", in(reg) &mut csr as *mut u32, options(nostack, preserves_flags));
+                let new = csr | 0x8040;
+                std::arch::asm!("ldmxcsr [{}]", in(reg) &new as *const u32, options(nostack, preserves_flags, readonly));
+            }
+            FlushDenormals { saved: csr }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            FlushDenormals {}
+        }
+    }
+}
+
+impl Drop for FlushDenormals {
+    fn drop(&mut self) {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: restores the value saved in new().
+        unsafe {
+            std::arch::asm!("ldmxcsr [{}]", in(reg) &self.saved as *const u32, options(nostack, preserves_flags, readonly));
+        }
+    }
+}
+
 /// A finished render.
 pub struct Render {
     pub sr: u32,
@@ -372,6 +410,7 @@ impl Engine {
     /// Fill `out` with the next frames. Returns how many frames were written; fewer than
     /// `out.len()` means the song is over.
     pub fn process(&mut self, out: &mut [Frame]) -> usize {
+        let _ftz = FlushDenormals::new();
         let mut done = 0;
         while done < out.len() && !self.finished {
             let n = (out.len() - done).min(MAX_BLOCK);

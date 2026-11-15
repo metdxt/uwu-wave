@@ -130,8 +130,8 @@ impl Biquad {
     #[inline]
     pub fn tick(&mut self, ch: usize, x: f32) -> f32 {
         let y = self.b0 * x + self.z1[ch];
-        self.z1[ch] = self.b1 * x - self.a1 * y + self.z2[ch];
-        self.z2[ch] = self.b2 * x - self.a2 * y;
+        self.z1[ch] = super::undenormal(self.b1 * x - self.a1 * y + self.z2[ch]);
+        self.z2[ch] = super::undenormal(self.b2 * x - self.a2 * y);
         y
     }
     #[inline]
@@ -189,8 +189,8 @@ impl Svf {
         let v3 = x - self.ic2;
         let v1 = self.a1 * self.ic1 + self.a2 * v3;
         let v2 = self.ic2 + self.a2 * self.ic1 + self.a3 * v3;
-        self.ic1 = 2.0 * v1 - self.ic1;
-        self.ic2 = 2.0 * v2 - self.ic2;
+        self.ic1 = super::undenormal(2.0 * v1 - self.ic1);
+        self.ic2 = super::undenormal(2.0 * v2 - self.ic2);
         SvfOut { lp: v2, bp: v1, hp: x - self.k * v1 - v2 }
     }
     #[inline]
@@ -228,7 +228,7 @@ impl OnePole {
     }
     #[inline]
     pub fn lp(&mut self, x: f32) -> f32 {
-        self.y += self.a * (x - self.y);
+        self.y = super::undenormal(self.y + self.a * (x - self.y));
         self.y
     }
     #[inline]

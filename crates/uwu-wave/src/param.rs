@@ -90,9 +90,11 @@ impl Automation {
     pub fn new() -> Self {
         Automation { points: vec![], default: 0.0, loop_len: None }
     }
-    /// A curve that starts (and stays, until more points are added) at `v`.
+    /// A curve that starts at `v` at beat 0 (and stays there until more points are added),
+    /// so `Automation::from_value(100).to(8.beats(), 140)` ramps 100 → 140.
     pub fn from_value(v: impl Val) -> Self {
-        Automation { points: vec![], default: v.val(), loop_len: None }
+        let v = v.val();
+        Automation { points: vec![Point { beat: 0.0, value: v, curve: Curve::Step }], default: v, loop_len: None }
     }
     /// Insert a point (kept sorted; points at equal times keep insertion order so you can jump).
     pub fn push(&mut self, at: impl Into<Time>, v: impl Val, curve: Curve) -> &mut Self {

@@ -44,6 +44,13 @@ impl<T: Seq + 'static> IntoSeq for T {
     }
 }
 
+/// Borrowed clips are cloned, so you can write `s.play(&bass, &riff)` without `.clone()`.
+impl IntoSeq for &Clip {
+    fn into_seq(self) -> Arc<dyn Seq> {
+        Arc::new(self.clone())
+    }
+}
+
 impl IntoSeq for Arc<dyn Seq> {
     fn into_seq(self) -> Arc<dyn Seq> {
         self

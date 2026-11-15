@@ -1,12 +1,67 @@
 //! Effects: everything that processes a stereo buffer in place.
+//!
+//! | area | effects |
+//! |---|---|
+//! | filters | [`LowPass`], [`HighPass`], [`BandPass`], [`Notch`], [`Ladder`], [`Eq`](struct@Eq) |
+//! | space | [`Reverb`], [`Delay`] |
+//! | modulation | [`Chorus`], [`Flanger`], [`Phaser`], [`Tremolo`], [`AutoPan`] |
+//! | colour | [`Distortion`], [`TapeSat`], [`Bitcrush`] |
+//! | dynamics | [`Compressor`], [`Limiter`], [`Gate`], [`Ducker`], [`TransientShaper`] |
+//! | utility | [`Utility`], [`Width`], [`Chain`] / [`chain!`](crate::chain), [`Parallel`], [`FnFx`] |
+//!
+//! Every knob takes `impl Into<Param>`: a number, `-6.db()`, an `auto![..]` curve, an `lfo::…`,
+//! a [`Lane`](crate::param::Lane) or an expression. Levels (thresholds, ceilings, EQ gains) are
+//! linear gains written with `.db()`; plain non-positive numbers are read as dB.
+//!
+//! ```ignore
+//! let verb = song.bus("verb").fx(Reverb::hall().wet());
+//! let bass = song.track("bass", bass)
+//!     .fx(chain![Ladder::new(lfo::sine(2.bars()).range(300.0, 3000.0)).resonance(0.5), Distortion::tube(2.0)])
+//!     .fx(Ducker::new("kick").amount(0.8).release(150.ms()));
+//! song.master().fx(Eq::new().low_cut(30.0)).fx(Compressor::glue()).fx(Limiter::new().ceiling(-1.db()));
+//! ```
 
 use crate::ctx::Ctx;
 use crate::dsp::Frame;
 
+pub mod chain;
+pub mod delay;
+pub mod distortion;
+pub mod dynamics;
+pub mod eq;
+pub mod filter;
 pub mod meter;
+pub mod modulation;
+pub mod reverb;
+pub mod util;
+pub mod utility;
+
+pub use chain::{Chain, Parallel};
+pub use delay::Delay;
+pub use distortion::{Bitcrush, DistMode, Distortion, TapeSat};
+pub use dynamics::{Compressor, Ducker, Gate, Limiter, TransientShaper};
+pub use eq::Eq;
+pub use filter::{BandPass, HighPass, Ladder, LowPass, Notch};
+pub use meter::Meter;
+pub use modulation::{AutoPan, Chorus, Flanger, Phaser, Tremolo};
+pub use reverb::Reverb;
+pub use util::DelayTime;
+pub use utility::{Utility, Width};
+
 pub mod prelude {
     //! Effects re-exported by `uwu_wave::prelude`.
+    pub use super::chain::{Chain, Parallel};
+    pub use super::delay::Delay;
+    pub use super::distortion::{Bitcrush, DistMode, Distortion, TapeSat};
+    pub use super::dynamics::{Compressor, Ducker, Gate, Limiter, TransientShaper};
+    pub use super::eq::Eq;
+    pub use super::filter::{BandPass, HighPass, Ladder, LowPass, Notch};
+    pub use super::modulation::{AutoPan, Chorus, Flanger, Phaser, Tremolo};
+    pub use super::reverb::Reverb;
+    pub use super::util::DelayTime;
+    pub use super::utility::{Utility, Width};
     pub use super::{Effect, FnFx};
+    pub use crate::chain;
 }
 
 /// The effect interface. Processes `buf` in place.
