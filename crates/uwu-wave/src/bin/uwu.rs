@@ -37,9 +37,99 @@ usage: uwu <command> [args]
   play <name> [args...]      build (release) and play once
   render <name> [args...]    build and run with args (renders out/<name>.wav by default)
   live <name> [args...]      play and restart on every save of examples/<name>.rs or src/
+  library build [--sources DIR] [--out DIR] [--only vpo,phil,piano,wavebase] [--jobs N]
+                             (re)build assets/library from the source mirrors
+  library list [filter]      list instruments and articulations
+  library info <id>          zones, range and dynamics of a patch
+  library index              regenerate assets/library/INDEX.md
 
 song args are passed through, e.g.  uwu live my_song --from chorus --loop
 environment: UWU_CRATE=<path to crates/uwu-wave> to use another checkout";
+
+    fn library(args: &[String]) {
+        use uwu_wave::sample::build::{self, BuildOptions};
+        use uwu_wave::sample::library::{Library, library_dir};
+        let sub = args.first().map(String::as_str).unwrap_or("list");
+        let flag = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+                .cloned()
+        };
+        let default_out = || {
+            library_dir()
+                .or_else(|| uwu_wave::sample::assets_dir().map(|a| a.join("library")))
+                .unwrap_or_else(|| PathBuf::from("assets/library"))
+        };
+        match sub {
+            "build" => {
+                let opts = BuildOptions {
+                    sources: flag("--sources")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(build::default_sources),
+                    out: flag("--out").map(PathBuf::from).unwrap_or_else(default_out),
+                    only: flag("--only")
+                        .map(|s| s.split(',').map(String::from).collect())
+                        .unwrap_or_default(),
+                    jobs: flag("--jobs")
+                        .and_then(|j| j.parse().ok())
+                        .unwrap_or_else(|| {
+                            std::thread::available_parallelism()
+                                .map(|n| n.get())
+                                .unwrap_or(4)
+                        }),
+                };
+                eprintln!(
+                    "sources: {}
+library: {}",
+                    opts.sources.display(),
+                    opts.out.display()
+                );
+                if let Err(e) = build::build(&opts) {
+                    die(e);
+                }
+            }
+            "index" => match build::reindex(&default_out()) {
+                Ok(n) => println!("✓ INDEX.md: {n} patches"),
+                Err(e) => die(e),
+            },
+            "info" => {
+                let id = args.get(1).unwrap_or_else(|| {
+                    die("usage: uwu library info <family/instrument[/articulation]>")
+                });
+                let p = Library::open()
+                    .and_then(|l| l.get(id))
+                    .unwrap_or_else(|e| die(e));
+                let (lo, hi) = p.range();
+                println!(
+                    "{} — {} zones, keys {}–{}, dynamics [{}], attack {} release {}",
+                    p.id,
+                    p.zones.len(),
+                    lo,
+                    hi,
+                    p.dynamics().join(" "),
+                    p.attack,
+                    p.release
+                );
+                println!("dir: {}", p.dir.display());
+            }
+            "list" | "ls" => {
+                let lib = Library::open().unwrap_or_else(|e| die(e));
+                let filter = args.get(1).cloned().unwrap_or_default();
+                for id in lib
+                    .instruments()
+                    .into_iter()
+                    .filter(|i| i.contains(&filter))
+                {
+                    println!("{id:<40} {}", lib.articulations(&id).join(" "));
+                }
+                println!("ir: {}", lib.irs().join(" "));
+            }
+            other => die(format!(
+                "unknown library command {other:?} (build, list, info, index)"
+            )),
+        }
+    }
 
     fn crate_dir() -> PathBuf {
         std::env::var_os("UWU_CRATE")
@@ -190,6 +280,7 @@ fn main() {{
                 .collect()
         };
         match cmd {
+            "library" | "lib" => library(&rest(1)),
             "list" | "ls" => {
                 for e in examples(&krate) {
                     println!("{e}");

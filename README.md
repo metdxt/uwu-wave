@@ -53,6 +53,8 @@ Examples (`crates/uwu-wave/examples/`):
 | `synth_demo` | every synth preset: acid, supersaw, pad, FM, plucks, organ, 808 bass, drum machines |
 | `fx_demo` | reverbs, delays, filters, dynamics, modulation, automation of effect knobs |
 | `pattern_demo` | mini-notation, drum grids, scale degrees, roman numerals, arps, swing, humanize |
+| `aurora` | the full orchestra: 18 sections on stage in a convolution hall, articulations, hairpins, legato |
+| `orchestra_sketch` | articulations, dynamics crossfades and legato, one feature at a time |
 | `sample_demo` | sampled piano, bass guitar, harp and acoustic kit from `assets/` |
 
 ## Command line (`song.run()`)
@@ -126,6 +128,7 @@ song.section("build", 8.bars(), |s| { s.ramp_exp(&sweep, 400.0, 20_000.0); });
 "bd(3,8,2) hh?0.3"          // euclid, random drop (seeded and repeatable)
 "hh*<8 16> rim(<3 5>,8)"    // patterned arguments: *<..>, /<..>, *[2 4], euclid(<..>,..)
 "[c4,e4,g4] Cmaj7 F#m7b5 a3'm7 c4^0.5"   // chords, chord symbols, ^velocity
+"c4^mf (d4 e4 f4) g4.stacc [a4 b4].pizz" // ^dynamics, (slur), .articulation (stacc st spicc sp pizz pz trem tr acc marc ten leg arco…)
 ```
 
 Plain strings work anywhere a sequence is expected, so `s.play(&bass, "c2 ~ c2 eb2")` is valid; so do
@@ -146,12 +149,22 @@ More: `sometimes/often/rarely`, `off`, `ply`/`chop`, `echo`/`stutter`, `struct_`
 `palindrome`, `iter`, `strum`, `chord("m7")`, `triads(key)`, `inv/drop2/open`, `vels("1 .5")`,
 `legato/staccato`, `late/early`, `degrade_by`, `fast_by("<1 2>")`, `.cycle(2.beats())`.
 
+Articulations, dynamics and orchestration (the tags reach instruments as `NoteOn::artic`):
+
+```rust
+let line = n("0 2 4 5 4 2 0 ~").scale("A4 minor").slur().cresc(Dyn::P, Dyn::F);
+let ost  = p("a2*8").stacc().dyns("<mp mf f ff>").artics("<spicc spicc stacc marc>");
+let [vln1, vln2, vla, vc] = orchestrate4(&chords);     // smooth 4-part voicing, one pattern per section
+let basses = vc.oct(-1).fit(Range::BASS);              // also .double_oct(-1), .pizz(), .trem(), .marcato()
+```
+
 ### Theory
 
 ```rust
 C4.maj7()   A3.min().inv(1)   Chord::parse("Bb/D")   Key::new(A3, Scale::Minor).degree(9)
 prog("ii7 V7 Imaj7", "C major")  voice_lead(key.prog("i VI III VII"))  Scale::Dorian, Scale::Blues, …
 Cs4 == Db4   C4 + 7 == G4   Key::parse("F# dorian")   key.quantize(E4)   Clip::note(0, 1, C4, 0.8)
+Range::VIOLIN.fit(C2)   C4.maj().spread_over(&[Range::VIOLIN, Range::VIOLA, Range::CELLO])   voice_satb(&chords, &STRING_SECTION)
 ```
 
 ### Instruments
@@ -176,6 +189,50 @@ progress line. `Sampler::preload_all()` loads everything.
 The `assets/wavebase` samples are git-LFS pointers. uwu-wave downloads the real files the
 first time a sample is played and caches them in `~/.cache/uwu-wave/lfs`. Set
 `UWU_OFFLINE=1` to turn fetching off and `UWU_ASSETS=<dir>` to point at another asset folder.
+
+### The orchestra
+
+`assets/library/` is a structured sample library: `<family>/<instrument>/<articulation>/`, with a
+`zones.txt` manifest next to the audio. It holds 292 patches built from the Virtual Playing
+Orchestra, the Philharmonia samples, a piano set and cluesurf/wave. See
+[INDEX.md](assets/library/INDEX.md) for the full list and
+[LICENSES.md](assets/library/LICENSES.md) for licences.
+
+```rust
+let vln1 = song.track("violins 1", Orchestra::violins_1())
+    .fx(Stage::at("violins-1"))                 // seat on stage: pan, depth, air, early reflections
+    .send(&hall, -8.db());                      // hall = song.bus("hall").fx(Convolver::hall().wet())
+let [hi, mid, low, bass] = orchestrate4(&chords);   // 4-part voice leading for a string section
+
+song.section("rising", 8.bars(), |s| {
+    s.play(&vln1, n("(0 1 2) 4@2 ~").scale(key));   // ( ) slur → legato engine, no re-attack
+    s.play(&vln2, mid.struct_("x*8").stacc());       // articulations pick sample sets
+    s.play(&cb, "[d2 a1].pizz d2^ff");                // .pizz .stacc .trem .acc …, ^dynamics
+    s.cresc(&vln1, Dyn::P, Dyn::FF);                 // CC1 crossfades pp → ff layers live
+});
+```
+
+- **Instruments:** `Orchestra::violins_1() violins_2() violas() cellos() basses() strings() flute() oboe()
+  cor_anglais() clarinet() bass_clarinet() bassoon() contrabassoon() piccolo() horns() horn_solo()
+  trumpet() trombones() tuba() timpani() glockenspiel() xylophone() vibraphone() celesta()
+  tubular_bells() harp() choir() cymbals() tam_tam() triangle()` and more (`Orchestra::available()`).
+- **Articulations:** `Artic::{Sustain, Legato, Staccato, Spiccato, Pizzicato, Tremolo, Accent, Marcato,
+  Tenuto, Trill, Harmonic, Muted…}`. Missing ones fall back sensibly (staccatissimo → staccato →
+  spiccato…), and short notes can switch to staccato automatically.
+- **Dynamics:** `track.dynamics(..)` / `s.dynamics` / `s.cresc` / `s.hairpin` drive CC1, which
+  crossfades the sample layers and opens the tone while notes sustain. `track.expression(..)` drives
+  CC11, and `track.cc(n, ..)` sets any controller. Without a CC1 lane, note velocity is the dynamic.
+- **Legato engine:** overlapping notes on section and solo instruments (or `Artic::Legato`, or CC68)
+  hand over with a crossfade and a short portamento instead of a new attack. The libraries contain no
+  recorded legato transitions, so this is simulated.
+- **Space:** `Convolver` is a partitioned-FFT convolution reverb with church, hall, studio, room and
+  spring rooms; its latency is compensated. `Stage::at(..)` handles American seating, and
+  `Compressor::orchestral()` and `Eq::orchestral_air()` are bus presets.
+- **Theory:** `Range::VIOLIN` and friends, `pattern.fit(range)`, `voice_satb`, `orchestrate4`, `.double_oct(n)`.
+
+The full example is `cargo run --release --example aurora`, a 2½-minute cue for 18 sections.
+The library is git-ignored; rebuild it from the source mirrors with
+`cargo run --release --bin uwu -- library build` (see [assets/README.md](assets/README.md)).
 
 ### Effects
 

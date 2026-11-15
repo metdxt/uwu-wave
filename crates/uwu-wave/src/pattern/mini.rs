@@ -2,7 +2,9 @@
 
 use super::rat::Rat;
 use super::{DEFAULT_VEL, Pattern};
+use crate::clip::Artic;
 use crate::theory::{Chord, Pitch, gm_drum, midi_of, parse_note_prefix};
+use crate::units::Dyn;
 use std::fmt;
 
 /// A mini-notation parse error, with the 1-based column and a caret-pointed rendering:
@@ -45,6 +47,10 @@ impl From<PatternError> for crate::error::Error {
 pub(crate) enum Mode {
     /// Notes, chords, drums, numbers.
     Notes,
+    /// Articulation names (`artics("<pizz arco>")`); values are [`artic_code`]s.
+    Artic,
+    /// Dynamics (`dyns("p mf f")`) or plain numbers; values are velocities.
+    Dyn,
     /// Structure patterns: `x`/`X`/`t`/`1` = hit (pitch 1), `0`/`f` = no hit.
     Bool,
 }
@@ -63,6 +69,8 @@ enum Node {
     Degrade(Box<Node>, f32, u64),
     Euclid(Box<Node>, IArg, IArg, IArg),
     Vel(Box<Node>, f32),
+    Art(Box<Node>, Artic),
+    Slur(Box<Node>),
 }
 
 /// A modifier argument: a constant or a (sub-)pattern of numbers (`a*<2 3>`, `hh*[2 4]`).
@@ -259,13 +267,44 @@ impl Parser<'_> {
                 '^' => {
                     self.pos += 1;
                     self.skip_ws();
-                    let (v, p0, l) = self.number()?;
-                    if !(0.0..=1.0).contains(&v) {
-                        return Err(self.err(p0, l, "velocity must be between 0 and 1"));
+                    if self.peek().is_some_and(|c| c.is_ascii_alphabetic()) {
+                        let (w, p0) = self.word();
+                        match Dyn::parse(&w) {
+                            Some(d) => node = Node::Vel(Box::new(node), d.0),
+                            None => {
+                                return Err(self.err(
+                                    p0,
+                                    w.chars().count(),
+                                    format!("unknown dynamic {w:?} (use ppp pp p mp mf f ff fff, or a number 0..1)"),
+                                ));
+                            }
+                        }
+                    } else {
+                        let (v, p0, l) = self.number()?;
+                        if !(0.0..=1.0).contains(&v) {
+                            return Err(self.err(p0, l, "velocity must be between 0 and 1"));
+                        }
+                        node = Node::Vel(Box::new(node), v as f32);
                     }
-                    node = Node::Vel(Box::new(node), v as f32);
                 }
-                '(' => {
+                '.' if save == op_pos
+                    && self.peek_at(1).is_some_and(|c| c.is_ascii_alphabetic()) =>
+                {
+                    self.pos += 1;
+                    let (w, p0) = self.word();
+                    match parse_artic(&w) {
+                        Some(a) => node = Node::Art(Box::new(node), a),
+                        None => {
+                            return Err(self.err(
+                                p0,
+                                w.chars().count(),
+                                format!("unknown articulation {w:?} (try stacc st, spicc sp, pizz pz, trem tr, acc, marc, ten, leg, sus, trill, harm, mute, arco)"),
+                            ));
+                        }
+                    }
+                }
+                // euclid args must touch the step (`bd(3,8)`); `bd (c4 d4)` is a step + slur
+                '(' if save == op_pos => {
                     self.pos += 1;
                     let mut args: Vec<(IArg, usize, usize)> = vec![];
                     loop {
@@ -454,7 +493,14 @@ impl Parser<'_> {
                     return Err(self.err(p0, l + 1, "unexpected letter after a number"));
                 }
                 Ok(match self.mode {
-                    Mode::Notes => Node::Note(v as f32),
+                    Mode::Notes | Mode::Dyn => Node::Note(v as f32),
+                    Mode::Artic => {
+                        return Err(self.err(
+                            p0,
+                            l,
+                            "expected an articulation name (stacc, pizz, arco...)",
+                        ));
+                    }
                     Mode::Bool => {
                         if v != 0.0 {
                             Node::Note(1.0)
@@ -480,11 +526,53 @@ impl Parser<'_> {
                 let word: String = self.chars[p0..self.pos].iter().collect();
                 self.atom(&word).map_err(|m| self.err(p0, self.pos - p0, m))
             }
+            '(' => {
+                self.pos += 1;
+                let parts = self.layers(Some((')', open_pos)))?;
+                if parts.iter().all(|p| p.is_empty()) {
+                    return Err(self.err(open_pos, self.pos - open_pos, "empty slur"));
+                }
+                let parts: Vec<Vec<Step>> = parts.into_iter().filter(|p| !p.is_empty()).collect();
+                Ok(Node::Slur(Box::new(stack_of(
+                    parts.into_iter().map(Node::Seq).collect(),
+                ))))
+            }
             _ => Err(self.err(self.pos, 1, format!("unexpected '{c}'"))),
         }
     }
 
+    /// An ASCII word (letters, digits, `-`) at the cursor. Returns (word, start).
+    fn word(&mut self) -> (String, usize) {
+        let p0 = self.pos;
+        while self
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            self.pos += 1;
+        }
+        (self.chars[p0..self.pos].iter().collect(), p0)
+    }
+
     fn atom(&self, w: &str) -> Result<Node, String> {
+        match self.mode {
+            Mode::Artic => {
+                return match parse_artic(w) {
+                    Some(a) => Ok(Node::Note(artic_code(a))),
+                    None => Err(format!(
+                        "unknown articulation {w:?} (try stacc, spicc, pizz, trem, acc, marc, ten, leg, sus, arco)"
+                    )),
+                };
+            }
+            Mode::Dyn => {
+                return match Dyn::parse(w) {
+                    Some(d) => Ok(Node::Note(d.0)),
+                    None => Err(format!(
+                        "unknown dynamic {w:?} (use ppp pp p mp mf f ff fff)"
+                    )),
+                };
+            }
+            _ => {}
+        }
         if self.mode == Mode::Bool {
             return match w {
                 "x" | "X" | "t" | "true" => Ok(Node::Note(1.0)),
@@ -635,6 +723,8 @@ fn compile(node: &Node) -> Pattern {
             let v = *v;
             compile(n).map_events(move |e| super::Event { vel: v, ..e })
         }
+        Node::Art(n, a) => compile(n).artic(*a),
+        Node::Slur(n) => compile(n).slur(),
     }
 }
 
@@ -660,4 +750,59 @@ fn euclid_pattern(inner: &Pattern, k: f64, n: f64, r: f64) -> Pattern {
         })
         .collect();
     Pattern::fastcat_w(items)
+}
+
+/// Articulation name → [`Artic`]: everything [`Artic::parse`] knows plus `arco`/`ord` (normal),
+/// `stacciss`/`sts` (staccatissimo) and `slur` (legato).
+pub(crate) fn parse_artic(w: &str) -> Option<Artic> {
+    match w.to_ascii_lowercase().as_str() {
+        "arco" | "ord" | "nat" => Some(Artic::Normal),
+        "sts" | "stacciss" => Some(Artic::Staccatissimo),
+        _ => Artic::parse(w),
+    }
+}
+
+/// Articulations travel through number patterns as codes.
+pub(crate) fn artic_code(a: Artic) -> f32 {
+    match a {
+        Artic::Normal => 0.0,
+        Artic::Legato => 1.0,
+        Artic::Sustain => 2.0,
+        Artic::Staccato => 3.0,
+        Artic::Staccatissimo => 4.0,
+        Artic::Spiccato => 5.0,
+        Artic::Pizzicato => 6.0,
+        Artic::Tremolo => 7.0,
+        Artic::Accent => 8.0,
+        Artic::Marcato => 9.0,
+        Artic::Tenuto => 10.0,
+        Artic::Trill => 11.0,
+        Artic::Harmonic => 12.0,
+        Artic::Muted => 13.0,
+        Artic::Custom(n) => 100.0 + n as f32,
+    }
+}
+
+pub(crate) fn artic_from_code(c: f32) -> Artic {
+    const ALL: [Artic; 14] = [
+        Artic::Normal,
+        Artic::Legato,
+        Artic::Sustain,
+        Artic::Staccato,
+        Artic::Staccatissimo,
+        Artic::Spiccato,
+        Artic::Pizzicato,
+        Artic::Tremolo,
+        Artic::Accent,
+        Artic::Marcato,
+        Artic::Tenuto,
+        Artic::Trill,
+        Artic::Harmonic,
+        Artic::Muted,
+    ];
+    let i = c.round() as i64;
+    if i >= 100 {
+        return Artic::Custom((i - 100).clamp(0, 255) as u8);
+    }
+    ALL.get(i.max(0) as usize).copied().unwrap_or(Artic::Normal)
 }

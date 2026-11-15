@@ -18,10 +18,12 @@
 mod chord;
 mod key;
 pub mod notes;
+mod orch;
 mod scale;
 
 pub use chord::Chord;
 pub use key::{Key, prog, voice_lead};
+pub use orch::{Range, STRING_SECTION, voice_satb};
 pub use scale::Scale;
 
 use crate::units::Val;
@@ -395,7 +397,9 @@ pub(crate) fn parse_note_prefix(s: &str, allow_octave: bool) -> Option<(i32, Opt
 
 pub mod prelude {
     pub use super::notes::*;
-    pub use super::{Chord, Key, Pitch, Scale, prog, voice_lead};
+    pub use super::{
+        Chord, Key, Pitch, Range, STRING_SECTION, Scale, prog, voice_lead, voice_satb,
+    };
 }
 
 #[cfg(test)]

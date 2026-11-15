@@ -27,8 +27,10 @@
 //! let bass = song.track("bass", Sampler::bass_guitar().gain(-2.db()));
 //! ```
 
+pub mod build;
 pub mod kit;
 pub mod lfs;
+pub mod library;
 pub mod load;
 mod presets;
 pub mod sampler;
@@ -41,5 +43,6 @@ pub use voice::Region;
 
 pub mod prelude {
     //! Sample items re-exported by `uwu_wave::prelude`.
+    pub use super::library::{Library, Patch};
     pub use super::{Sample, SampleKit, Sampler, Zone};
 }

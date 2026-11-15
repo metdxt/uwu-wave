@@ -203,6 +203,42 @@ impl SampleKit {
         }
         self
     }
+    /// A kit from a library patch: every zone becomes a pad on its key (zones sharing a key are
+    /// round-robin alternatives), keeping the zones' tuning and gain.
+    pub fn from_patch(p: &super::library::Patch) -> SampleKit {
+        let mut k = SampleKit::new().named(p.id.clone());
+        for z in &p.zones {
+            let note = z
+                .keys
+                .map(|(lo, _)| lo)
+                .unwrap_or(z.root)
+                .round()
+                .clamp(0.0, 127.0) as u8;
+            match k.pad_mut(note) {
+                Some(pad) => pad.srcs.push(z.src.clone()),
+                None => k.pads.push(Pad {
+                    note,
+                    srcs: vec![z.src.clone()],
+                    gain: z.gain,
+                    tune: z.tune + (z.keys.map(|(lo, _)| lo).unwrap_or(z.root) - z.root),
+                    pan: z.pan,
+                    choke: None,
+                    decay: None,
+                    region: Region {
+                        trim: true,
+                        ..z.region
+                    },
+                }),
+            }
+        }
+        k
+    }
+    /// A kit from a library id (`"drums/acoustic-kit"`, `"drums/kick-808"`…). Panics with a
+    /// list of nearby ids if it doesn't exist.
+    pub fn library(id: &str) -> SampleKit {
+        let p = super::library::Library::patch(id).unwrap_or_else(|e| panic!("uwu-wave: {e}"));
+        SampleKit::from_patch(&p)
+    }
     /// Add a round-robin alternative sample to pad `note` (creates the pad if needed).
     pub fn alt(mut self, note: u8, path: impl AsRef<Path>) -> SampleKit {
         if self.pad_mut(note).is_none() {

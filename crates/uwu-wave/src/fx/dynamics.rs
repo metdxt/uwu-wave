@@ -112,6 +112,17 @@ impl Compressor {
             .release(0.160)
             .knee(3.0)
     }
+    /// Gentle orchestral bus control: 1.5:1 above -24 dB, slow 30 ms attack keeps articulation,
+    /// 300 ms release follows phrases, wide knee. Barely audible — it just tames climaxes.
+    pub fn orchestral() -> Compressor {
+        Compressor::new()
+            .threshold(db_amp(-24.0))
+            .ratio(1.5)
+            .attack(0.030)
+            .release(0.300)
+            .knee(12.0)
+            .auto_makeup()
+    }
     /// Level above which compression starts (`-18.db()`).
     pub fn threshold(mut self, t: impl Into<Param>) -> Self {
         self.threshold = t.into();

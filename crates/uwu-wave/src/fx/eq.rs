@@ -123,6 +123,15 @@ impl Eq {
         self.bands.push(b);
         self
     }
+    /// Orchestral mix polish: rumble cut at 25 Hz, a touch less low-mid mud around 300 Hz, a
+    /// gentle presence lift and an airy high shelf.
+    pub fn orchestral_air() -> Eq {
+        Eq::new()
+            .low_cut_slope(25.0, 12)
+            .peak(300.0, -1.5, 0.8)
+            .peak(3_000.0, 0.8, 0.7)
+            .high_shelf(11_000.0, 2.0f32.powf(2.5 / 6.02))
+    }
     /// 24 dB/oct high-pass ("low cut") at `freq`.
     pub fn low_cut(self, freq: impl Into<Param>) -> Eq {
         self.low_cut_slope(freq, 24)

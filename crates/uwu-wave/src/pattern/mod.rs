@@ -32,7 +32,9 @@
 //! | `a _ _`           | tie: each `_` extends the previous step by one step                      |
 //! | `a?` / `a?0.3`    | drop the event randomly (50% / 30%), deterministic, varies per cycle     |
 //! | `bd(3,8)` / `bd(3,8,2)` | euclidean rhythm: 3 hits over 8 steps, rotated left by 2; patterned: `bd(<3 5>,8)` |
-//! | `c4^0.6`          | **velocity** (0..1) for a step or group; default velocity is 0.8         |
+//! | `c4^0.6` / `c4^mf` | **velocity** (0..1) or **dynamic** (`ppp pp p mp mf f ff fff`) for a step or group; default 0.8 |
+//! | `c4.stacc`        | **articulation** for a step or group (no space before `.`): `stacc`/`st`, `stacciss`/`sts`, `spicc`/`sp`, `pizz`/`pz`, `trem`/`tr`, `acc`, `marc`, `ten`, `leg`, `sus`, `trill`, `harm`, `mute`, `arco` |
+//! | `(c4 d4 e4)`      | **slur**: a legato group — all but the last note tagged `Legato` and overlapping the next |
 //!
 //! **Atoms**: note names `c4`, `C#4`, `eb3`, `cs4` (`s` = sharp), `a` (no octave = octave 4);
 //! MIDI numbers `60`, `61.5` (with [`n`] they are scale degrees, may be negative `-1`);
@@ -64,7 +66,7 @@ pub use grid::{drum_grid, grid};
 pub use mini::PatternError;
 pub use ops::ArpMode;
 
-use crate::clip::{IntoSeq, Note, Seq};
+use crate::clip::{Artic, IntoSeq, Note, Seq};
 use crate::theory::{Chord, Pitch};
 use rat::Rat;
 use std::sync::Arc;
@@ -82,6 +84,8 @@ pub struct Event {
     pub pitch: f32,
     /// Velocity 0..1.
     pub vel: f32,
+    /// Articulation (playing technique), forwarded to the instrument.
+    pub artic: Artic,
 }
 
 impl Event {
@@ -234,6 +238,7 @@ impl Pattern {
                     dur: 1.0,
                     pitch,
                     vel,
+                    artic: Artic::Normal,
                 })
                 .collect()
         })
@@ -460,7 +465,7 @@ impl Seq for Pattern {
                 dur: e.dur * bpc,
                 pitch: e.pitch,
                 vel: e.vel.clamp(0.0, 1.0),
-                artic: Default::default(),
+                artic: e.artic,
             })
             .collect()
     }
@@ -719,6 +724,27 @@ impl IntoSeq for Vec<Pitch> {
     }
 }
 
+/// Voice a progression for a four-part string section (violins I, violins II, violas, cellos —
+/// see [`crate::theory::STRING_SECTION`]) with smooth voice leading: one pattern per section, one
+/// chord per cycle.
+///
+/// ```
+/// use uwu_wave::prelude::*;
+/// let chords = prog("i VI III VII", "A minor");
+/// let [vln1, vln2, vla, vc] = orchestrate4(&chords);
+/// let basses = vc.double_oct(-1).fit(Range::BASS);      // or vc.oct(-1)
+/// # let _ = (vln1.slur(), vln2.trem(), vla.dyns("<p mf>"), basses);
+/// ```
+pub fn orchestrate4(chords: &[Chord]) -> [Pattern; 4] {
+    orchestrate(chords, &crate::theory::STRING_SECTION)
+}
+
+/// [`orchestrate4`] with custom ranges (top → bottom), e.g.
+/// `orchestrate(&chords, &[Range::FLUTE, Range::OBOE, Range::CLARINET, Range::BASSOON])`.
+pub fn orchestrate(chords: &[Chord], ranges: &[crate::theory::Range; 4]) -> [Pattern; 4] {
+    crate::theory::voice_satb(chords, ranges).map(Pattern::alt)
+}
+
 /// Parse a mini-notation pattern (panics with a caret-pointed message on error).
 ///
 /// ```
@@ -788,7 +814,9 @@ macro_rules! drums {
 }
 
 pub mod prelude {
-    pub use super::{ArpMode, Pattern, PatternError, ToPattern, degrees, grid, n, p};
+    pub use super::{
+        ArpMode, Pattern, PatternError, ToPattern, degrees, grid, n, orchestrate, orchestrate4, p,
+    };
     pub use crate::{drums, pat, seq};
 }
 

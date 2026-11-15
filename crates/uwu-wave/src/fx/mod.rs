@@ -3,7 +3,7 @@
 //! | area | effects |
 //! |---|---|
 //! | filters | [`LowPass`], [`HighPass`], [`BandPass`], [`Notch`], [`Ladder`], [`Eq`](struct@Eq) |
-//! | space | [`Reverb`], [`Delay`] |
+//! | space | [`Reverb`], [`Convolver`], [`Delay`], [`Stage`] (orchestral seating) |
 //! | modulation | [`Chorus`], [`Flanger`], [`Phaser`], [`Tremolo`], [`AutoPan`] |
 //! | colour | [`Distortion`], [`TapeSat`], [`Bitcrush`] |
 //! | dynamics | [`Compressor`], [`Limiter`], [`Gate`], [`Ducker`], [`TransientShaper`] |
@@ -25,18 +25,22 @@ use crate::ctx::Ctx;
 use crate::dsp::Frame;
 
 pub mod chain;
+pub mod convolver;
 pub mod delay;
 pub mod distortion;
 pub mod dynamics;
 pub mod eq;
+pub mod fft;
 pub mod filter;
 pub mod meter;
 pub mod modulation;
 pub mod reverb;
+pub mod stage;
 pub mod util;
 pub mod utility;
 
 pub use chain::{Chain, Parallel};
+pub use convolver::Convolver;
 pub use delay::Delay;
 pub use distortion::{Bitcrush, DistMode, Distortion, TapeSat};
 pub use dynamics::{Compressor, Ducker, Gate, Limiter, TransientShaper};
@@ -45,12 +49,14 @@ pub use filter::{BandPass, HighPass, Ladder, LowPass, Notch};
 pub use meter::Meter;
 pub use modulation::{AutoPan, Chorus, Flanger, Phaser, Tremolo};
 pub use reverb::Reverb;
+pub use stage::Stage;
 pub use util::DelayTime;
 pub use utility::{Utility, Width};
 
 pub mod prelude {
     //! Effects re-exported by `uwu_wave::prelude`.
     pub use super::chain::{Chain, Parallel};
+    pub use super::convolver::Convolver;
     pub use super::delay::Delay;
     pub use super::distortion::{Bitcrush, DistMode, Distortion, TapeSat};
     pub use super::dynamics::{Compressor, Ducker, Gate, Limiter, TransientShaper};
@@ -58,6 +64,7 @@ pub mod prelude {
     pub use super::filter::{BandPass, HighPass, Ladder, LowPass, Notch};
     pub use super::modulation::{AutoPan, Chorus, Flanger, Phaser, Tremolo};
     pub use super::reverb::Reverb;
+    pub use super::stage::Stage;
     pub use super::util::DelayTime;
     pub use super::utility::{Utility, Width};
     pub use super::{Effect, FnFx};

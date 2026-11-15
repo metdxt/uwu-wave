@@ -130,14 +130,32 @@ pub fn resolve(path: &Path) -> Result<PathBuf, Error> {
         )));
     }
     let url = url_for(path)?;
+    fetch(&url, ptr.size, &ptr.oid, &rel_display(path))
+}
+
+/// Download `url` (expected `size` bytes, SHA-256 `oid`) into the LFS cache — or return the
+/// cached copy. Used for git-LFS pointers and for remote zones of library manifests
+/// (`url=… size=… sha256=…`).
+pub fn fetch(url: &str, size: u64, oid: &str, label: &str) -> Result<PathBuf, Error> {
+    let ptr = LfsPointer {
+        oid: oid.to_ascii_lowercase(),
+        size,
+    };
+    let cached = cached_path(&ptr);
+    if let Ok(m) = std::fs::metadata(&cached)
+        && m.len() == ptr.size
+    {
+        return Ok(cached);
+    }
+    if offline() {
+        return Err(Error::Invalid(format!(
+            "{label} is remote ({url}), not cached yet, and UWU_OFFLINE is set"
+        )));
+    }
     let dir = cached.parent().map(Path::to_path_buf).unwrap_or_default();
     std::fs::create_dir_all(&dir)?;
     if QUIET.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-        eprintln!(
-            "⇣ fetching {} ({:.1} MB)",
-            rel_display(path),
-            ptr.size as f64 / 1e6
-        );
+        eprintln!("⇣ fetching {label} ({:.1} MB)", ptr.size as f64 / 1e6);
     }
     static PART: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let part = dir.join(format!(
@@ -152,7 +170,7 @@ pub fn resolve(path: &Path) -> Result<PathBuf, Error> {
         .arg("2")
         .arg("-o")
         .arg(&part)
-        .arg(&url)
+        .arg(url)
         .status()
         .map_err(|e| Error::Other(format!("could not run curl to fetch {url}: {e}")))?;
     if !status.success() {
@@ -180,6 +198,17 @@ pub fn resolve(path: &Path) -> Result<PathBuf, Error> {
     Ok(cached)
 }
 
+/// Is a remote file already in the cache?
+pub fn is_cached(size: u64, oid: &str) -> bool {
+    let p = cached_path(&LfsPointer {
+        oid: oid.to_ascii_lowercase(),
+        size,
+    });
+    std::fs::metadata(p)
+        .map(|m| m.len() == size)
+        .unwrap_or(false)
+}
+
 fn rel_display(path: &Path) -> String {
     let s = path.to_string_lossy();
     match s.find("wavebase/") {
@@ -189,7 +218,7 @@ fn rel_display(path: &Path) -> String {
 }
 
 /// Download URL: the base URL + the path relative to the closest `wavebase` ancestor.
-fn url_for(path: &Path) -> Result<String, Error> {
+pub fn url_for(path: &Path) -> Result<String, Error> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {

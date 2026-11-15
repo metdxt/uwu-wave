@@ -573,3 +573,151 @@ fn combining_different_cycle_lengths_keeps_beats() {
         vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
     );
 }
+
+fn artics_of(p: &Pattern) -> Vec<crate::clip::Artic> {
+    p.first_cycle().iter().map(|e| e.artic).collect()
+}
+
+#[test]
+fn articulation_notation() {
+    use crate::clip::Artic::*;
+    assert_eq!(
+        artics_of(&p("c4.stacc d4 e4.pz f4.ten")),
+        vec![Staccato, Normal, Pizzicato, Tenuto]
+    );
+    assert_eq!(
+        artics_of(&p("[c4 d4].trem e4.arco")),
+        vec![Tremolo, Tremolo, Normal]
+    );
+    assert_eq!(
+        artics_of(&p("c4.st^ff bd*2.acc")),
+        vec![Staccato, Accent, Accent]
+    );
+    assert_eq!(
+        p("c4^ff d4^pp")
+            .first_cycle()
+            .iter()
+            .map(|e| e.vel)
+            .collect::<Vec<_>>(),
+        vec![0.92, 0.2]
+    );
+    // number then artic, artic after euclid and speed
+    assert_eq!(
+        artics_of(&p("60.marc bd(3,8).sp")),
+        vec![Marcato, Spiccato, Spiccato, Spiccato]
+    );
+    // whitespace before '.' is not an articulation
+    assert!(Pattern::parse("c4 .stacc").is_err());
+    let e = Pattern::parse("c4.blah").unwrap_err();
+    assert!(e.message.contains("articulation") && e.col == 4, "{e}");
+    assert!(Pattern::parse("c4^loud").is_err());
+    // artic reaches clip notes
+    let n = p("c4.pizz").notes(0.0, 4.0);
+    assert_eq!(n[0].artic, Pizzicato);
+}
+
+#[test]
+fn slurs() {
+    use crate::clip::Artic::*;
+    let a = p("(c4 d4 e4) f4");
+    let e = a.first_cycle();
+    assert_eq!(
+        e.iter().map(|e| e.artic).collect::<Vec<_>>(),
+        vec![Legato, Legato, Normal, Normal]
+    );
+    // slurred notes overlap their successor
+    assert!(e[0].end() > e[1].start && e[1].end() > e[2].start);
+    assert!(e[2].end() <= e[3].start + 1e-9);
+    let s = p("c4 [d4 e4] g4").slur();
+    let ev = s.first_cycle();
+    assert_eq!(ev.iter().filter(|e| e.artic == Legato).count(), 3);
+    assert!(ev[0].end() > ev[1].start);
+    assert!(Pattern::parse("c4 (d4 e4").is_err());
+    assert_eq!(p("bd (c4 d4)").first_cycle().len(), 3);
+    assert_eq!(p("bd(3,8) (c4 d4)").first_cycle().len(), 5);
+}
+
+#[test]
+fn articulation_combinators() {
+    use crate::clip::Artic::*;
+    let a = p("c4 d4");
+    assert_eq!(artics_of(&a.stacc()), vec![Staccato, Staccato]);
+    assert_eq!(a.stacc().first_cycle()[0].dur, 0.25);
+    assert_eq!(artics_of(&a.pizz()), vec![Pizzicato, Pizzicato]);
+    assert!(a.marcato().first_cycle()[0].vel > 0.95);
+    assert_eq!(artics_of(&a.artic(Trill)), vec![Trill, Trill]);
+    let pa = p("c4*4").artics("<pizz arco> [stacc ~]");
+    assert_eq!(artics_of(&pa), vec![Pizzicato, Pizzicato, Staccato, Normal]);
+    assert_eq!(
+        pa.events(1.0, 2.0)
+            .iter()
+            .map(|e| e.artic)
+            .collect::<Vec<_>>(),
+        vec![Normal, Normal, Staccato, Normal]
+    );
+    // combinators keep the articulation
+    let k = p("c4.pizz e4")
+        .fast(2)
+        .rev()
+        .up(12)
+        .every(2, |p| p.ply(2))
+        .struct_("x x x x");
+    assert!(k.first_cycle().iter().any(|e| e.artic == Pizzicato));
+    assert_eq!(artics_of(&p("C").pizz().arp("up", 3)), vec![Pizzicato; 3]);
+    assert_eq!(
+        artics_of(&p("c4").struct_("x.stacc x")),
+        vec![Staccato, Normal]
+    );
+}
+
+#[test]
+fn dynamics() {
+    use crate::units::Dyn;
+    let a = p("c4 d4^1");
+    let v: Vec<f32> = a
+        .dynamic(Dyn::P)
+        .first_cycle()
+        .iter()
+        .map(|e| e.vel)
+        .collect();
+    assert!((v[0] - 0.35).abs() < 1e-6 && v[1] > v[0]);
+    let d = p("c4*4").dyns("<pp ff>");
+    assert!((d.first_cycle()[0].vel - 0.2).abs() < 1e-6);
+    assert!((d.events(1.0, 2.0)[0].vel - 0.92).abs() < 1e-6);
+    let c = p("c4*4").cresc(Dyn::P, Dyn::F);
+    let v: Vec<f32> = c.first_cycle().iter().map(|e| e.vel).collect();
+    assert!(
+        v.windows(2).all(|w| w[1] > w[0]) && (v[0] - 0.35).abs() < 1e-6,
+        "{v:?}"
+    );
+    let c2 = p("c4*4").cresc_over(Dyn::P, Dyn::F, 2);
+    assert!(c2.events(1.0, 2.0)[0].vel > c2.first_cycle()[3].vel);
+    assert_eq!(c2.cycles(), 2.0);
+    let dm = p("c4*4").dim(Dyn::F, Dyn::PP);
+    assert!(dm.first_cycle()[3].vel < dm.first_cycle()[0].vel);
+    let ph = p("c4*8").phrase(1.0);
+    assert!((30..=34).contains(&ph.events(0.0, 4.0).len()));
+}
+
+#[test]
+fn orchestration() {
+    let chords = Key::major(C4).prog("I vi IV V");
+    let [v1, v2, va, vc] = orchestrate4(&chords);
+    assert_eq!(v1.cycles(), 4.0);
+    for c in 0..4 {
+        let t = |p: &Pattern| p.events(c as f64, c as f64 + 1.0)[0].pitch;
+        assert!(t(&v1) > t(&v2) && t(&v2) > t(&va) && t(&va) > t(&vc));
+    }
+    let b = vc.double_oct(-1);
+    assert_eq!(b.first_cycle().len(), 2);
+    assert_eq!(
+        p("c7 c1")
+            .fit(crate::theory::Range::CELLO)
+            .first_cycle()
+            .iter()
+            .map(|e| e.pitch)
+            .collect::<Vec<_>>(),
+        vec![84.0, 36.0]
+    );
+    assert_eq!(p("c4").double(7).first_cycle().len(), 2);
+}

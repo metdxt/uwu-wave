@@ -34,6 +34,7 @@ pub mod pattern;
 pub mod theory;
 pub mod synth;
 pub mod sample;
+pub mod orchestra;
 pub mod io;
 pub mod prelude;
 

@@ -36,20 +36,58 @@ impl<P: RootPitch> RootPitch for Option<P> {
 /// Lazily loaded sample source shared by zone clones.
 pub(crate) struct Src {
     path: Option<PathBuf>,
+    remote: Option<Remote>,
     cell: OnceLock<Option<Arc<Sample>>>,
+}
+
+/// A remotely hosted file (library manifests: `url=… size=… sha256=…`).
+#[derive(Clone, Debug)]
+pub(crate) struct Remote {
+    pub url: String,
+    pub size: u64,
+    pub sha256: String,
 }
 
 impl Src {
     pub(crate) fn path(p: PathBuf) -> Arc<Src> {
         Arc::new(Src {
             path: Some(p),
+            remote: None,
             cell: OnceLock::new(),
         })
+    }
+    /// A file that may be missing locally and is then fetched from `remote`.
+    pub(crate) fn remote(p: PathBuf, remote: Remote) -> Arc<Src> {
+        Arc::new(Src {
+            path: Some(p),
+            remote: Some(remote),
+            cell: OnceLock::new(),
+        })
+    }
+    /// Bytes that loading this source would download (0 if local/cached).
+    pub(crate) fn download_size(&self) -> u64 {
+        if let Some(r) = &self.remote {
+            let local = self.path.as_ref().map(|p| p.is_file()).unwrap_or(false);
+            if local || super::lfs::is_cached(r.size, &r.sha256) {
+                return 0;
+            }
+            return r.size;
+        }
+        self.path
+            .as_ref()
+            .filter(|p| !super::lfs::is_available(p))
+            .and_then(|p| super::lfs::LfsPointer::read(p))
+            .map(|ptr| ptr.size)
+            .unwrap_or(0)
     }
     pub(crate) fn sample(s: Arc<Sample>) -> Arc<Src> {
         let cell = OnceLock::new();
         let _ = cell.set(Some(s));
-        Arc::new(Src { path: None, cell })
+        Arc::new(Src {
+            path: None,
+            remote: None,
+            cell,
+        })
     }
     /// Already loaded (or failed)?
     pub(crate) fn is_loaded(&self) -> bool {
@@ -60,7 +98,19 @@ impl Src {
         self.cell
             .get_or_init(|| {
                 let p = self.path.as_ref()?;
-                match Sample::load(p) {
+                let loaded = match &self.remote {
+                    Some(r) if !p.is_file() => {
+                        let label = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        super::lfs::fetch(&r.url, r.size, &r.sha256, &label).and_then(|c| {
+                            Sample::load_uncached(&c).map(|s| Arc::new(s.named(label)))
+                        })
+                    }
+                    _ => Sample::load(p),
+                };
+                match loaded {
                     Ok(s) => Some(s),
                     Err(e) => {
                         eprintln!("uwu-wave: sample {}: {e}", p.display());
@@ -96,6 +146,11 @@ pub struct Zone {
     pub pan: f32,
     /// Playback region.
     pub region: Region,
+    /// Layer: zones on different layers sound *together* (stacked sections, body + attack…);
+    /// within a layer the usual key/velocity/round-robin selection applies.
+    pub layer: u8,
+    /// Dynamic label from a library manifest (`pp`..`ff`), informational.
+    pub dynamic: Option<String>,
 }
 
 impl Zone {
@@ -124,6 +179,23 @@ impl Zone {
             tune: 0.0,
             pan: 0.0,
             region: Region::default(),
+            layer: 0,
+            dynamic: None,
+        }
+    }
+    /// Put the zone on a layer (layers play simultaneously).
+    pub fn layer(mut self, n: u8) -> Zone {
+        self.layer = n;
+        self
+    }
+    /// Does this zone's key range (or, without one, its root ±6 semitones) cover `pitch`?
+    fn covers(&self, pitch: f32) -> bool {
+        match self.keys {
+            Some((lo, hi)) => {
+                let k = pitch.round();
+                k >= lo && k <= hi
+            }
+            None => (self.root - pitch).abs() <= 6.0,
         }
     }
     /// Restrict to keys `lo..=hi`.
@@ -261,28 +333,60 @@ struct Layers {
 /// Zones chosen for one note.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Sel {
-    idx: [usize; 2],
-    w: [f32; 2],
+    idx: [usize; MAX_HEADS],
+    w: [f32; MAX_HEADS],
     n: usize,
 }
+
+/// Simultaneous sample heads per voice (layers × velocity crossfade).
+pub(crate) const MAX_HEADS: usize = 4;
 
 pub(crate) struct Shared {
     zones: Vec<Zone>,
     cfg: Cfg,
     rr: Vec<AtomicU32>,
+    layer_ids: Vec<u8>,
 }
 
 impl Shared {
     fn new(zones: Vec<Zone>, cfg: Cfg) -> Shared {
+        let mut layer_ids: Vec<u8> = zones.iter().map(|z| z.layer).collect();
+        layer_ids.sort();
+        layer_ids.dedup();
         Shared {
             zones,
             cfg,
-            rr: (0..128).map(|_| AtomicU32::new(0)).collect(),
+            rr: (0..128 * 4).map(|_| AtomicU32::new(0)).collect(),
+            layer_ids,
         }
     }
 
     fn same_group(a: &Zone, b: &Zone) -> bool {
-        (a.root - b.root).abs() < 1e-4 && a.keys == b.keys
+        a.layer == b.layer && (a.root - b.root).abs() < 1e-4 && a.keys == b.keys
+    }
+
+    /// Layers that take part in a note: those with a zone covering the key; if none does, the
+    /// single layer closest to it.
+    fn active_layers(&self, pitch: f32) -> Vec<u8> {
+        if self.layer_ids.len() <= 1 {
+            return self.layer_ids.clone();
+        }
+        let v: Vec<u8> = self
+            .layer_ids
+            .iter()
+            .copied()
+            .filter(|&l| self.zones.iter().any(|z| z.layer == l && z.covers(pitch)))
+            .collect();
+        if !v.is_empty() {
+            return v;
+        }
+        let best = self
+            .zones
+            .iter()
+            .min_by(|a, b| a.score(pitch).total_cmp(&b.score(pitch)))
+            .map(|z| z.layer)
+            .unwrap_or(0);
+        vec![best]
     }
 
     /// Equal-power weight of zone `x` (in the key group of `g`) at velocity `v`. Edges only
@@ -322,18 +426,18 @@ impl Shared {
 
     /// Key group (best key/root match; ties prefer the zone above, which repitches downwards)
     /// and the velocity layers a note plays.
-    fn layers(&self, pitch: f32, vel: f32) -> Option<Layers> {
+    fn layers(&self, pitch: f32, vel: f32, layer: u8) -> Option<Layers> {
         let z = &self.zones;
-        if z.is_empty() {
+        if !z.iter().any(|x| x.layer == layer) {
             return None;
         }
         let h = 0.5 * self.cfg.vel_xfade;
         let reach = |x: &Zone| vel >= x.vel.0 - h - 1e-6 && vel <= x.vel.1 + h + 1e-6;
-        let any = z.iter().any(reach);
+        let any = z.iter().any(|x| x.layer == layer && reach(x));
         let mut best: Option<usize> = None;
         let mut best_score = f32::INFINITY;
         for (i, x) in z.iter().enumerate() {
-            if any && !reach(x) {
+            if x.layer != layer || (any && !reach(x)) {
                 continue;
             }
             let s = x.score(pitch);
@@ -384,16 +488,27 @@ impl Shared {
         Some(l)
     }
 
-    /// Pick the zones for a note (round-robin among equivalent zones, one counter step per note).
+    /// Pick the zones for a note: every active layer, each with up to two velocity layers
+    /// (round-robin among equivalent zones, one counter step per note and layer).
     fn select(&self, pitch: f32, vel: f32) -> Sel {
-        let Some(l) = self.layers(pitch, vel) else {
-            return Sel::default();
+        let mut sel = Sel::default();
+        for layer in self.active_layers(pitch) {
+            self.select_layer(pitch, vel, layer, &mut sel);
+        }
+        sel
+    }
+
+    fn select_layer(&self, pitch: f32, vel: f32, layer: u8, sel: &mut Sel) {
+        let Some(l) = self.layers(pitch, vel, layer) else {
+            return;
         };
         let g = &self.zones[l.group];
-        let slot = g.root.round().clamp(0.0, 127.0) as usize;
+        let slot = g.root.round().clamp(0.0, 127.0) as usize + 128 * (layer as usize % 4);
         let mut k: Option<u32> = None;
-        let mut sel = Sel::default();
         for i in 0..l.n {
+            if sel.n >= MAX_HEADS {
+                break;
+            }
             let matches = |x: &&Zone| Self::same_group(x, g) && x.vel == l.vel[i];
             let n = self.zones.iter().filter(matches).count() as u32;
             if n == 0 {
@@ -416,18 +531,19 @@ impl Shared {
                 sel.n += 1;
             }
         }
-        sel
     }
 
     /// Every zone a note could trigger (all round-robin alternates of all its layers).
     fn candidates(&self, pitch: f32, vel: f32, out: &mut Vec<usize>) {
-        let Some(l) = self.layers(pitch, vel) else {
-            return;
-        };
-        let g = &self.zones[l.group];
-        for (i, x) in self.zones.iter().enumerate() {
-            if Self::same_group(x, g) && l.vel[..l.n].contains(&x.vel) && !out.contains(&i) {
-                out.push(i);
+        for layer in self.active_layers(pitch) {
+            let Some(l) = self.layers(pitch, vel, layer) else {
+                continue;
+            };
+            let g = &self.zones[l.group];
+            for (i, x) in self.zones.iter().enumerate() {
+                if Self::same_group(x, g) && l.vel[..l.n].contains(&x.vel) && !out.contains(&i) {
+                    out.push(i);
+                }
             }
         }
     }
@@ -441,17 +557,7 @@ pub(crate) fn load_all(srcs: &[Arc<Src>]) {
     if todo.is_empty() {
         return;
     }
-    let fetch: Vec<u64> = todo
-        .iter()
-        .map(|s| {
-            s.path
-                .as_ref()
-                .filter(|p| !super::lfs::is_available(p))
-                .and_then(|p| super::lfs::LfsPointer::read(p))
-                .map(|ptr| ptr.size)
-                .unwrap_or(0)
-        })
-        .collect();
+    let fetch: Vec<u64> = todo.iter().map(|s| s.download_size()).collect();
     let n_fetch = fetch.iter().filter(|&&b| b > 0).count();
     let total_bytes: u64 = fetch.iter().sum();
     let next = AtomicUsize::new(0);
@@ -552,10 +658,10 @@ impl Bend {
 pub struct SamplerVoice {
     shared: Option<Arc<Shared>>,
     sr: f32,
-    play: [Play; 2],
-    lw: [f32; 2],
-    base: [f64; 2],
-    fade: [Fader; 2],
+    play: [Play; MAX_HEADS],
+    lw: [f32; MAX_HEADS],
+    base: [f64; MAX_HEADS],
+    fade: [Fader; MAX_HEADS],
     env: Adsr,
     amp: f32,
     gl: f32,
@@ -571,7 +677,7 @@ pub struct SamplerVoice {
 
 impl SamplerVoice {
     fn playing(&self) -> bool {
-        self.play[0].is_playing() || self.play[1].is_playing()
+        self.play.iter().any(|p| p.is_playing())
     }
 }
 
@@ -586,7 +692,7 @@ impl Voice for SamplerVoice {
         let sr = if self.sr > 0.0 { self.sr } else { ctx.sr };
         self.sr = sr;
         // de-click whatever was playing
-        for i in 0..2 {
+        for i in 0..MAX_HEADS {
             if self.play[i].is_playing() {
                 let g = self.env.level() * self.amp * self.lw[i];
                 self.fade[i].begin(&mut self.play[i], g, 0.004, sr);
@@ -599,7 +705,7 @@ impl Voice for SamplerVoice {
         }
         self.bend.reset(ctx.p(&c.tune) + ctx.bend);
         let r0 = self.bend.ratio();
-        self.lw = [0.0; 2];
+        self.lw = [0.0; MAX_HEADS];
         for k in 0..sel.n {
             let z = &sh.zones[sel.idx[k]];
             let Some(smp) = z.src.get() else { continue };
@@ -644,7 +750,7 @@ impl Voice for SamplerVoice {
         for f in &mut self.fade {
             f.render(out, gl, gr);
         }
-        let fading = self.fade[0].active() || self.fade[1].active();
+        let fading = self.fade.iter().any(|f| f.active());
         let Some(sh) = self.shared.as_ref() else {
             return false;
         };
@@ -663,7 +769,7 @@ impl Voice for SamplerVoice {
         let moving = self.bend.moving();
         if !moving {
             let r = self.bend.ratio();
-            for k in 0..2 {
+            for k in 0..MAX_HEADS {
                 self.play[k].set_step(self.base[k] * r);
             }
         }
@@ -682,20 +788,26 @@ impl Voice for SamplerVoice {
                 f.set(cut, 0.6, self.sr);
             }
         }
-        let [w0, w1] = self.lw;
+        let lw = self.lw;
         for (i, f) in out.iter_mut().enumerate() {
             if moving {
                 let r = self.bend.at(i, n);
-                self.play[0].set_step(self.base[0] * r);
-                self.play[1].set_step(self.base[1] * r);
+                for k in 0..MAX_HEADS {
+                    self.play[k].set_step(self.base[k] * r);
+                }
             }
             let e = self.env.next();
-            let a = self.play[0].next();
-            let b = self.play[1].next();
-            if a.is_none() && b.is_none() {
+            let mut x = Frame::ZERO;
+            let mut any = false;
+            for k in 0..MAX_HEADS {
+                if let Some(s) = self.play[k].next() {
+                    x += s * lw[k];
+                    any = true;
+                }
+            }
+            if !any {
                 break;
             }
-            let mut x = a.unwrap_or_default() * w0 + b.unwrap_or_default() * w1;
             if self.filt_on {
                 x = Frame::new(self.filt[0].lp(x.l), self.filt[1].lp(x.r));
             }
@@ -703,8 +815,7 @@ impl Voice for SamplerVoice {
             f.l += x.l * g * gl;
             f.r += x.r * g * gr;
             if self.env.is_idle() {
-                self.play[0].stop();
-                self.play[1].stop();
+                self.play.iter_mut().for_each(|p| p.stop());
                 break;
             }
         }

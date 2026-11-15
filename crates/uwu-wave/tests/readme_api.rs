@@ -40,6 +40,12 @@ fn readme_snippets_compile_and_render() {
     let _ops2 = &hook + &degs;
     let _ops3 = &beat * 4;
     let _pr2 = p("hh*<8 16> rim(<3 5>,8)").chop(2).echo(3, 0.125, 0.5);
+    let _art = p("c4^mf (d4 e4 f4) g4.stacc [a4 b4].pizz");
+    let _line = n("0 2 4 5 4 2 0 ~").scale("A4 minor").slur().cresc(Dyn::P, Dyn::F);
+    let _ost = p("a2*8").stacc().dyns("<mp mf f ff>").artics("<spicc spicc stacc marc>");
+    let [_vln1, _vln2, _vla, vc] = orchestrate4(&chords);
+    let _basses = vc.oct(-1).fit(Range::BASS).double_oct(-1).pizz().trem().marcato();
+    let _th = (Range::VIOLIN.fit(C2), C4.maj().spread_over(&[Range::VIOLIN, Range::VIOLA, Range::CELLO]), voice_satb(&chords, &STRING_SECTION));
     let _x = (Cs4 == Db4, C4 + 7 == G4, Key::parse("F# dorian").unwrap().quantize(E4));
 
     song.section("verse", 4.bars(), |s| {

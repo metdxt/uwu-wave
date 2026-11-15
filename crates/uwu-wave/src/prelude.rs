@@ -24,3 +24,5 @@ pub use crate::sample::prelude::*;
 pub use crate::synth::prelude::*;
 #[allow(unused_imports)]
 pub use crate::theory::prelude::*;
+#[allow(unused_imports)]
+pub use crate::orchestra::prelude::*;

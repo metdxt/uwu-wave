@@ -3,8 +3,9 @@
 use super::mini::{Mode, euclid_bools};
 use super::rat::Rat;
 use super::{DEFAULT_VEL, EPS, Event, Pattern, Q, mini};
+use crate::clip::Artic;
 use crate::dsp::{hash_bipolar, hash01, splitmix};
-use crate::theory::{Chord, Key};
+use crate::theory::{Chord, Key, Pitch, Range};
 use crate::time::Time;
 use crate::units::Val;
 use std::ops::{Add, BitAnd, Mul};
@@ -521,6 +522,7 @@ impl Pattern {
                     dur,
                     pitch: p.0,
                     vel,
+                    artic: g[0].artic,
                 }));
             }
             out
@@ -691,6 +693,219 @@ impl Pattern {
         out
     }
 
+    // ------------------------------------------------------------- articulation & dynamics
+
+    /// Apply a control pattern (parsed in `mode`): every event takes the value of the control
+    /// event sounding at its onset.
+    fn with_control(
+        &self,
+        control: Pattern,
+        f: impl Fn(Event, f32) -> Event + Send + Sync + 'static,
+    ) -> Pattern {
+        let inner = self.clone();
+        let lb = control.lookback();
+        let period = self.period().lcm(control.period());
+        self.derive(period, move |q| {
+            let cs = control.q(&q.span(q.from - lb, q.to));
+            inner
+                .q(q)
+                .into_iter()
+                .map(|e| {
+                    match cs
+                        .iter()
+                        .rev()
+                        .find(|c| c.start <= e.start + EPS && e.start < c.end() - EPS)
+                    {
+                        Some(c) => f(e, c.pitch),
+                        None => e,
+                    }
+                })
+                .collect()
+        })
+    }
+    /// Tag every note with an articulation (instruments pick the matching sample set / behaviour).
+    /// Durations are left alone — see [`Pattern::stacc`] & co. for the shortening shorthands.
+    pub fn artic(&self, a: Artic) -> Pattern {
+        self.map_events(move |e| Event { artic: a, ..e })
+    }
+    fn artic_len(&self, a: Artic, len: f64, vel: f32) -> Pattern {
+        self.map_events(move |e| Event {
+            artic: a,
+            dur: e.dur * len,
+            vel: (e.vel * vel).clamp(0.0, 1.0),
+            ..e
+        })
+    }
+    /// Staccato: tagged [`Artic::Staccato`], half length.
+    pub fn stacc(&self) -> Pattern {
+        self.artic_len(Artic::Staccato, 0.5, 1.0)
+    }
+    /// Staccatissimo: very short (quarter length).
+    pub fn staccatissimo(&self) -> Pattern {
+        self.artic_len(Artic::Staccatissimo, 0.25, 1.0)
+    }
+    /// Spiccato (bounced bow): short and a little lighter.
+    pub fn spicc(&self) -> Pattern {
+        self.artic_len(Artic::Spiccato, 0.4, 0.92)
+    }
+    /// Pizzicato (plucked strings). The pluck rings on its own, so durations are kept.
+    pub fn pizz(&self) -> Pattern {
+        self.artic(Artic::Pizzicato)
+    }
+    /// Back to normal playing (`arco` / `ord.`).
+    pub fn arco(&self) -> Pattern {
+        self.artic(Artic::Normal)
+    }
+    /// Tremolo.
+    pub fn trem(&self) -> Pattern {
+        self.artic(Artic::Tremolo)
+    }
+    /// Accent: tagged and 15% louder.
+    pub fn accent(&self) -> Pattern {
+        self.artic_len(Artic::Accent, 1.0, 1.15)
+    }
+    /// Marcato: tagged, 25% louder and slightly detached (75% length).
+    pub fn marcato(&self) -> Pattern {
+        self.artic_len(Artic::Marcato, 0.75, 1.25)
+    }
+    /// Tenuto: tagged, held for the full step.
+    pub fn tenuto(&self) -> Pattern {
+        self.artic_len(Artic::Tenuto, 1.0, 1.05)
+    }
+    /// Long sustained notes ([`Artic::Sustain`]).
+    pub fn sustain(&self) -> Pattern {
+        self.artic(Artic::Sustain)
+    }
+    /// Slur every cycle into one legato phrase: each note except the last of the cycle is tagged
+    /// [`Artic::Legato`] and stretched to overlap the next onset by 5% (so mono/legato engines see
+    /// the overlap and glide instead of re-attacking). Chords move together. Mini-notation: `(c4 d4 e4)`.
+    pub fn slur(&self) -> Pattern {
+        let inner = self.clone();
+        self.derive(self.period(), move |q| {
+            let mut out = vec![];
+            for c in q.cycles() {
+                let cf = c as f64;
+                let all = onset_groups(inner.q(&q.span(cf, cf + 1.0)));
+                for (i, g) in all.iter().enumerate() {
+                    let next = all.get(i + 1).map(|n| n[0].start);
+                    for e in g {
+                        if !q.has(e.start) {
+                            continue;
+                        }
+                        out.push(match next {
+                            Some(n) => Event {
+                                artic: Artic::Legato,
+                                dur: e.dur.max(n - e.start) * 1.05,
+                                ..*e
+                            },
+                            None => *e,
+                        });
+                    }
+                }
+            }
+            out
+        })
+    }
+    /// Alias of [`Pattern::slur`].
+    pub fn legato_phrase(&self) -> Pattern {
+        self.slur()
+    }
+    /// Articulations from a pattern of names: `.artics("<pizz arco>")`, `.artics("stacc stacc ten ~")`
+    /// (`~` leaves notes untouched). Names: everything [`Artic::parse`] accepts plus `arco`.
+    #[track_caller]
+    pub fn artics(&self, names: &str) -> Pattern {
+        let c = mini::parse(names, Mode::Artic).unwrap_or_else(|e| panic!("{e}"));
+        self.with_control(c, |e, v| Event {
+            artic: super::mini::artic_from_code(v),
+            ..e
+        })
+    }
+    /// Play at a dynamic level: velocities are scaled so that a default-velocity note (0.8) lands
+    /// exactly on `d` — accents and ghost notes keep their relative weight. `.dyn(Dyn::MF)`.
+    pub fn dynamic(&self, d: impl Val) -> Pattern {
+        let k = d.val() / DEFAULT_VEL;
+        self.map_events(move |e| Event {
+            vel: (e.vel * k).clamp(0.0, 1.0),
+            ..e
+        })
+    }
+    /// Dynamics from a pattern: `.dyns("<p mf f ff>")` (one per cycle), `.dyns("pp [mp mf]")`.
+    /// Same relative scaling as [`Pattern::dynamic`].
+    #[track_caller]
+    pub fn dyns(&self, levels: &str) -> Pattern {
+        let c = mini::parse(levels, Mode::Dyn).unwrap_or_else(|e| panic!("{e}"));
+        self.with_control(c, |e, v| Event {
+            vel: (e.vel * v / DEFAULT_VEL).clamp(0.0, 1.0),
+            ..e
+        })
+    }
+    /// Crescendo across the pattern's whole loop: the dynamic ramps from `from` to `to`
+    /// (`.cresc(Dyn::P, Dyn::FF)`). Use [`Pattern::cresc_over`] to pick the ramp length.
+    pub fn cresc(&self, from: impl Val, to: impl Val) -> Pattern {
+        let n = self.cycles();
+        self.cresc_over(from, to, n)
+    }
+    /// Diminuendo (same as [`Pattern::cresc`], reads better with `from > to`).
+    pub fn dim(&self, from: impl Val, to: impl Val) -> Pattern {
+        self.cresc(from, to)
+    }
+    /// Dynamic ramp from `from` to `to` repeating every `cycles` cycles.
+    pub fn cresc_over(&self, from: impl Val, to: impl Val, cycles: impl Val) -> Pattern {
+        let (a, b) = (from.val(), to.val());
+        let len = (cycles.val() as f64).max(1e-6);
+        let period = self.period().lcm(super::rat::Rat::from_f64(len));
+        let inner = self.clone();
+        self.derive(period, move |q| {
+            inner
+                .q(q)
+                .into_iter()
+                .map(|e| {
+                    let t = (e.start.rem_euclid(len) / len) as f32;
+                    let d = a + (b - a) * t;
+                    Event {
+                        vel: (e.vel * d / DEFAULT_VEL).clamp(0.0, 1.0),
+                        ..e
+                    }
+                })
+                .collect()
+        })
+    }
+    /// Gentle musical humanizing for phrases: small timing drift (`amount` × 15 ms at 120 bpm),
+    /// velocity variation and a slight swell towards the middle of each cycle.
+    pub fn phrase(&self, amount: impl Val) -> Pattern {
+        let a = amount.val().clamp(0.0, 2.0);
+        self.humanize(0.03 * a as f64, 0.06 * a)
+            .map_events(move |e| {
+                let x = e.start.rem_euclid(1.0) as f32;
+                let swell = 1.0 + 0.08 * a * (std::f32::consts::PI * x).sin();
+                Event {
+                    vel: (e.vel * swell).clamp(0.0, 1.0),
+                    ..e
+                }
+            })
+    }
+
+    // ------------------------------------------------------------- orchestration
+
+    /// Octave-shift every note into an instrument range: `.fit(Range::CELLO)`.
+    pub fn fit(&self, range: Range) -> Pattern {
+        self.map_events(move |e| Event {
+            pitch: range.fit(Pitch(e.pitch)).0,
+            ..e
+        })
+    }
+    /// Double every note `st` semitones away (`.double(-12)` = octave below, `.double(7)` = fifths).
+    pub fn double(&self, st: impl Val) -> Pattern {
+        let st = st.val();
+        self.superimpose(|p| p.transpose(st))
+    }
+    /// Double every note `n` octaves away (`.double_oct(-1)` for a bass doubling). For
+    /// convenience `±12`, `±24` are read as semitones.
+    pub fn double_oct(&self, n: i32) -> Pattern {
+        let st = if n.abs() >= 12 { n } else { 12 * n };
+        self.double(st)
+    }
+
     // ------------------------------------------------------------- structure
 
     fn cycle_switch(
@@ -851,6 +1066,12 @@ impl Pattern {
                             dur: h.dur,
                             pitch: e.pitch,
                             vel: e.vel,
+                            // a structure step's articulation (`x.stacc`) wins over the source's
+                            artic: if h.artic == Artic::Normal {
+                                e.artic
+                            } else {
+                                h.artic
+                            },
                         });
                     }
                 }
