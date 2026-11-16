@@ -54,6 +54,7 @@ Examples (`crates/uwu-wave/examples/`):
 | `fx_demo` | reverbs, delays, filters, dynamics, modulation, automation of effect knobs |
 | `pattern_demo` | mini-notation, drum grids, scale degrees, roman numerals, arps, swing, humanize |
 | `aurora` | the full orchestra: 18 sections on stage in a convolution hall, articulations, hairpins, legato |
+| `violin` | solo violin showcase: legato and portamento, spiccato, pizzicato, tremolo, harmonics, hairpins (best with the Philharmonia import) |
 | `orchestra_sketch` | articulations, dynamics crossfades and legato, one feature at a time |
 | `sample_demo` | sampled piano, bass guitar, harp and acoustic kit from `assets/` |
 
@@ -186,17 +187,34 @@ Before rendering or `--play`, samplers and kits **preload exactly the samples yo
 hit**, so nothing is loaded in the audio thread. Git-LFS files are fetched 6 at a time with a
 progress line. `Sampler::preload_all()` loads everything.
 
-The `assets/wavebase` samples are git-LFS pointers. uwu-wave downloads the real files the
-first time a sample is played and caches them in `~/.cache/uwu-wave/lfs`. Set
-`UWU_OFFLINE=1` to turn fetching off and `UWU_ASSETS=<dir>` to point at another asset folder.
+The library's audio is stored in the repo with **Git LFS**. Install `git-lfs` before cloning (or run
+`git lfs pull` afterwards). A few cluesurf/wave patches (bass and electric guitars, celtic harp,
+zither, the drum one-shot folders, sfx) are 4+ GB of 32-bit recordings, so they stay *remote*: their
+manifests point at cluesurf's GitHub LFS, and uwu-wave downloads each file the first time it's
+played into `~/.cache/uwu-wave/lfs`. Set `UWU_OFFLINE=1` to turn fetching off and
+`UWU_ASSETS=<dir>` to point at another asset folder.
 
 ### The orchestra
 
 `assets/library/` is a structured sample library: `<family>/<instrument>/<articulation>/`, with a
-`zones.txt` manifest next to the audio. It holds 292 patches built from the Virtual Playing
-Orchestra, the Philharmonia samples, a piano set and cluesurf/wave. See
+`zones.txt` manifest next to the audio. It is committed with Git LFS and holds 150 patches built from
+the Virtual Playing Orchestra, a piano set and cluesurf/wave. See
 [INDEX.md](assets/library/INDEX.md) for the full list and
 [LICENSES.md](assets/library/LICENSES.md) for licences.
+
+**Philharmonia samples (recommended).** Their licence doesn't allow bundling them, so import them
+yourself. They add a solo violin, viola, cello and double bass, solo woodwinds, horn, trumpet,
+trombone and tuba, all with pp–ff layers and many articulations, plus 38 percussion instruments:
+
+1. Download the archives from [philharmonia.co.uk/resources/sound-samples](https://philharmonia.co.uk/resources/sound-samples/)
+   (`all-samples.zip`, or the Strings/Woodwind/Brass/Percussion zips).
+2. `cargo run --release --bin uwu -- library import philharmonia path/to/*.zip`. With no paths, it
+   looks in the repo, its parent folder and `~/Downloads`.
+
+The import (about 70 s, 815 MB) goes to the git-ignored `assets/local/`. Any instrument found there
+replaces the bundled one, and every `Orchestra::*` preset works without it by falling back to the
+nearest bundled patch (`flute()` → flute section, `violin_solo()` → the VPO solo violin, and so on).
+It prints a one-line hint when it does.
 
 ```rust
 let vln1 = song.track("violins 1", Orchestra::violins_1())
@@ -231,7 +249,7 @@ song.section("rising", 8.bars(), |s| {
 - **Theory:** `Range::VIOLIN` and friends, `pattern.fit(range)`, `voice_satb`, `orchestrate4`, `.double_oct(n)`.
 
 The full example is `cargo run --release --example aurora`, a 2½-minute cue for 18 sections.
-The library is git-ignored; rebuild it from the source mirrors with
+The library is committed with Git LFS (about 1.4 GB). To regenerate it from the original source mirrors, run
 `cargo run --release --bin uwu -- library build` (see [assets/README.md](assets/README.md)).
 
 ### Effects

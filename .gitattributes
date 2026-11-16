@@ -1,0 +1,3 @@
+# Sample library audio lives in Git LFS (install git-lfs before cloning).
+# Manifests (zones.txt), INDEX.md and LICENSES.md stay plain text.
+assets/library/**/*.wav filter=lfs diff=lfs merge=lfs -text

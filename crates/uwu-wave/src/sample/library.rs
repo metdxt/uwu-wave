@@ -44,19 +44,47 @@ pub const DEFAULT_ARTICS: [&str; 6] = [
     "tremolo",
 ];
 
-/// The library folder: `$UWU_LIBRARY`, else `<assets>/library`.
+/// The base (redistributable) library folder: the last root of `$UWU_LIBRARY`, else
+/// `<assets>/library`.
 pub fn library_dir() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("UWU_LIBRARY").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(p));
+    if let Some(v) = std::env::var_os("UWU_LIBRARY").filter(|p| !p.is_empty()) {
+        return std::env::split_paths(&v).last();
     }
     let d = assets_dir()?.join("library");
     d.is_dir().then_some(d)
 }
 
-/// A handle on the sample library.
+/// The local overlay folder for imported, non-redistributable libraries: the first root of
+/// `$UWU_LIBRARY` when it lists several, else `<assets>/local` (it may not exist yet).
+pub fn local_dir() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("UWU_LIBRARY").filter(|p| !p.is_empty()) {
+        let roots: Vec<PathBuf> = std::env::split_paths(&v).collect();
+        if roots.len() > 1 {
+            return roots.first().cloned();
+        }
+    }
+    Some(assets_dir()?.join("local"))
+}
+
+/// Library roots in lookup order (first wins): `$UWU_LIBRARY` (`:`-separated), else
+/// `<assets>/local` (if present) then `<assets>/library`.
+pub fn library_roots() -> Vec<PathBuf> {
+    if let Some(v) = std::env::var_os("UWU_LIBRARY").filter(|p| !p.is_empty()) {
+        return std::env::split_paths(&v).filter(|p| p.is_dir()).collect();
+    }
+    let Some(a) = assets_dir() else { return vec![] };
+    [a.join("local"), a.join("library")]
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// A handle on the sample library: one or more roots with the same layout. For an instrument
+/// (`family/inst`) the first root that has it wins — the whole instrument, so an import in the
+/// local overlay replaces the base version (`brass/trumpet` from Philharmonia shadows VPO's).
 #[derive(Clone, Debug)]
 pub struct Library {
-    root: PathBuf,
+    roots: Vec<PathBuf>,
 }
 
 /// One zone line of a manifest, before it becomes a [`Zone`].
@@ -363,7 +391,9 @@ impl Patch {
             .iter()
             .filter_map(|z| z.dynamic.clone().map(|d| (z.vel.0, d)))
             .collect();
-        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        const ORDER: [&str; 8] = ["ppp", "pp", "p", "mp", "mf", "f", "ff", "fff"];
+        let rank = |d: &str| ORDER.iter().position(|x| *x == d).unwrap_or(4);
+        v.sort_by(|a, b| rank(&a.1).cmp(&rank(&b.1)).then(a.0.total_cmp(&b.0)));
         let mut out: Vec<String> = vec![];
         for (_, d) in v {
             if !out.contains(&d) {
@@ -418,35 +448,85 @@ fn subdirs(d: &Path) -> Vec<String> {
 }
 
 impl Library {
-    /// Open the default library (`$UWU_LIBRARY` or `<assets>/library`).
+    /// Open the default library: `$UWU_LIBRARY` (`:`-separated roots, first wins), else
+    /// `<assets>/local` (imports, git-ignored) over `<assets>/library` (bundled).
     pub fn open() -> Result<Library, Error> {
-        match library_dir() {
-            Some(d) => Ok(Library { root: d }),
-            None => Err(Error::Invalid(
-                "sample library not found: expected <assets>/library (build it with `uwu library build`, or set UWU_LIBRARY / UWU_ASSETS)".into(),
-            )),
+        let roots = library_roots();
+        if roots.is_empty() {
+            return Err(Error::Invalid(
+                "sample library not found: expected <assets>/library (set UWU_LIBRARY or UWU_ASSETS)".into(),
+            ));
+        }
+        Ok(Library { roots })
+    }
+    /// A library with a single root.
+    pub fn at(root: impl Into<PathBuf>) -> Library {
+        Library {
+            roots: vec![root.into()],
         }
     }
-    /// Open a library at an explicit folder.
-    pub fn at(root: impl Into<PathBuf>) -> Library {
-        Library { root: root.into() }
+    /// A library over several roots (first wins).
+    pub fn with_roots(roots: impl IntoIterator<Item = PathBuf>) -> Library {
+        Library {
+            roots: roots.into_iter().collect(),
+        }
     }
-    /// The library folder.
+    /// The first (highest-priority) root.
     pub fn root(&self) -> &Path {
-        &self.root
+        self.roots
+            .first()
+            .map(PathBuf::as_path)
+            .unwrap_or(Path::new("."))
     }
-    /// Instrument families present (`strings`, `brass`…).
+    /// All roots in lookup order.
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+    /// The root that provides an instrument (`family/inst`, or a full articulation id).
+    pub fn root_of(&self, id: &str) -> Option<&Path> {
+        let inst: Vec<&str> = id.trim_matches('/').split('/').take(2).collect();
+        let inst = inst.join("/");
+        self.roots
+            .iter()
+            .find(|r| {
+                let d = r.join(&inst);
+                subdirs(&d)
+                    .iter()
+                    .any(|a| d.join(a).join("zones.txt").is_file())
+            })
+            .map(PathBuf::as_path)
+    }
+    /// Is an instrument served from an overlay (any root but the last, e.g. `assets/local`)?
+    pub fn is_local(&self, id: &str) -> bool {
+        match self.root_of(id) {
+            Some(r) => self.roots.len() > 1 && Some(r) != self.roots.last().map(PathBuf::as_path),
+            None => false,
+        }
+    }
+    /// Instrument families present (`strings`, `brass`…), merged over all roots.
     pub fn families(&self) -> Vec<String> {
-        subdirs(&self.root)
-            .into_iter()
+        let mut v: Vec<String> = self
+            .roots
+            .iter()
+            .flat_map(|r| subdirs(r))
             .filter(|f| f != "ir")
-            .collect()
+            .collect();
+        v.sort();
+        v.dedup();
+        v
     }
-    /// Every instrument id (`family/instrument`) that has at least one articulation.
+    /// Every instrument id (`family/instrument`) with at least one articulation, merged.
     pub fn instruments(&self) -> Vec<String> {
         let mut v = vec![];
         for fam in self.families() {
-            for inst in subdirs(&self.root.join(&fam)) {
+            let mut insts: Vec<String> = self
+                .roots
+                .iter()
+                .flat_map(|r| subdirs(&r.join(&fam)))
+                .collect();
+            insts.sort();
+            insts.dedup();
+            for inst in insts {
                 let id = format!("{fam}/{inst}");
                 if !self.articulations(&id).is_empty() {
                     v.push(id);
@@ -455,42 +535,54 @@ impl Library {
         }
         v
     }
-    /// Articulations of an instrument (folders with a `zones.txt`).
+    /// Articulations of an instrument (from the root that provides it).
     pub fn articulations(&self, instrument: &str) -> Vec<String> {
-        let d = self.root.join(instrument);
+        let Some(r) = self.root_of(instrument) else {
+            return vec![];
+        };
+        let d = r.join(instrument);
         subdirs(&d)
             .into_iter()
             .filter(|a| d.join(a).join("zones.txt").is_file())
             .collect()
     }
-    /// Impulse responses (`ir/*.wav`), by name without extension.
+    /// Impulse responses (`ir/*.wav` of every root), by name without extension.
     pub fn irs(&self) -> Vec<String> {
-        let mut v: Vec<String> = std::fs::read_dir(self.root.join("ir"))
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().map(|x| x == "wav").unwrap_or(false))
-                    .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-                    .collect()
+        let mut v: Vec<String> = self
+            .roots
+            .iter()
+            .flat_map(|r| {
+                std::fs::read_dir(r.join("ir"))
+                    .map(|rd| {
+                        rd.filter_map(|e| e.ok())
+                            .map(|e| e.path())
+                            .filter(|p| p.extension().map(|x| x == "wav").unwrap_or(false))
+                            .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
             })
-            .unwrap_or_default();
+            .collect();
         v.sort();
+        v.dedup();
         v
     }
     /// Path of an impulse response (`"church"`).
     pub fn ir(&self, name: &str) -> Result<PathBuf, Error> {
-        let p = self
-            .root
-            .join("ir")
-            .join(format!("{}.wav", name.trim_end_matches(".wav")));
-        if p.is_file() {
-            Ok(p)
-        } else {
-            Err(Error::Invalid(format!(
-                "no impulse response {name:?} (have: {})",
-                self.irs().join(", ")
-            )))
-        }
+        let file = format!(
+            "{}.wav",
+            name.trim_start_matches("ir/").trim_end_matches(".wav")
+        );
+        self.roots
+            .iter()
+            .map(|r| r.join("ir").join(&file))
+            .find(|p| p.is_file())
+            .ok_or_else(|| {
+                Error::Invalid(format!(
+                    "no impulse response {name:?} (have: {})",
+                    self.irs().join(", ")
+                ))
+            })
     }
 
     /// Resolve an id to its articulation folder: `family/instrument/artic`, or
@@ -514,7 +606,10 @@ impl Library {
             }
             _ => return Err(self.not_found(id)),
         };
-        let dir = self.root.join(&full);
+        let Some(root) = self.root_of(&full) else {
+            return Err(self.not_found(&full));
+        };
+        let dir = root.join(&full);
         if dir.join("zones.txt").is_file() {
             Ok((full, dir))
         } else {
@@ -549,9 +644,10 @@ impl Library {
             near = all.iter().collect();
         }
         let near: Vec<String> = near.into_iter().take(24).cloned().collect();
+        let roots: Vec<String> = self.roots.iter().map(|r| r.display().to_string()).collect();
         Error::Invalid(format!(
             "no instrument {id:?} in {}; try: {}",
-            self.root.display(),
+            roots.join(" + "),
             near.join(", ")
         ))
     }
@@ -664,6 +760,49 @@ mod tests {
         let e = lib.get("brass/hron").unwrap_err().to_string();
         assert!(e.contains("brass/horn"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn overlay_resolution() {
+        let base = std::env::temp_dir().join(format!("uwu-lib-base-{}", std::process::id()));
+        let local = std::env::temp_dir().join(format!("uwu-lib-local-{}", std::process::id()));
+        let mk = |root: &Path, id: &str, body: &str| {
+            std::fs::create_dir_all(root.join(id)).unwrap();
+            std::fs::write(root.join(id).join("zones.txt"), body).unwrap();
+        };
+        mk(
+            &base,
+            "brass/trumpet/sustain",
+            "@release=0.1\nfile=a.wav root=60\n",
+        );
+        mk(&base, "brass/trumpet/accent", "file=a.wav root=60\n");
+        mk(&base, "brass/tuba/sustain", "file=t.wav root=40\n");
+        mk(
+            &local,
+            "brass/trumpet/sustain",
+            "@release=0.9\nfile=b.wav root=62\n",
+        );
+        mk(&local, "strings/violin/sustain", "file=v.wav root=67\n");
+        std::fs::create_dir_all(base.join("ir")).unwrap();
+        std::fs::write(base.join("ir/church.wav"), b"x").unwrap();
+        let lib = Library::with_roots([local.clone(), base.clone()]);
+        // the overlay wins for the whole instrument (no base-only articulation leaks through)
+        let p = lib.get("brass/trumpet").unwrap();
+        assert_eq!((p.release, p.dir.starts_with(&local)), (0.9, true));
+        assert_eq!(lib.articulations("brass/trumpet"), vec!["sustain"]);
+        assert!(lib.get("brass/trumpet/accent").is_err());
+        // base fallback
+        let t = lib.get("brass/tuba").unwrap();
+        assert!(t.dir.starts_with(&base));
+        assert!(lib.is_local("brass/trumpet") && !lib.is_local("brass/tuba"));
+        // merged listing
+        assert_eq!(
+            lib.instruments(),
+            vec!["brass/trumpet", "brass/tuba", "strings/violin"]
+        );
+        assert_eq!(lib.ir("church").unwrap(), base.join("ir/church.wav"));
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&local);
     }
 
     #[test]

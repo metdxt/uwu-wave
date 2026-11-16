@@ -96,18 +96,24 @@ impl Sample {
     pub fn load_uncached(path: impl AsRef<Path>) -> Result<Sample, Error> {
         let path = path.as_ref();
         let real = super::lfs::resolve(path)?;
-        let mut r = hound::WavReader::open(&real)
-            .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
-        let spec = r.spec();
-        let ch = spec.channels.max(1) as usize;
-        let raw: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>()?,
-            hound::SampleFormat::Int => {
-                let k = 1.0 / (1u64 << (spec.bits_per_sample.clamp(8, 32) - 1)) as f64;
-                r.samples::<i32>()
-                    .map(|s| s.map(|v| (v as f64 * k) as f32))
-                    .collect::<Result<_, _>>()?
+        let (sr, ch, raw) = match hound::WavReader::open(&real) {
+            Ok(mut r) => {
+                let spec = r.spec();
+                let raw: Vec<f32> = match spec.sample_format {
+                    hound::SampleFormat::Float => r.samples::<f32>().collect::<Result<_, _>>()?,
+                    hound::SampleFormat::Int => {
+                        let k = 1.0 / (1u64 << (spec.bits_per_sample.clamp(8, 32) - 1)) as f64;
+                        r.samples::<i32>()
+                            .map(|s| s.map(|v| (v as f64 * k) as f32))
+                            .collect::<Result<_, _>>()?
+                    }
+                };
+                (spec.sample_rate, spec.channels.max(1) as usize, raw)
             }
+            // hound is strict about the fmt chunk (e.g. 18/20-byte PCM headers with cbSize):
+            // fall back to a tolerant RIFF reader
+            Err(e) => decode_wav_lenient(&std::fs::read(&real)?)
+                .map_err(|e2| Error::Invalid(format!("{}: {e} ({e2})", path.display())))?,
         };
         let frames: Vec<Frame> = raw
             .chunks_exact(ch)
@@ -123,7 +129,7 @@ impl Sample {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut s = Sample::from_frames(frames, spec.sample_rate as f32).named(name.clone());
+        let mut s = Sample::from_frames(frames, sr as f32).named(name.clone());
         s.path = Some(path.to_path_buf());
         s.root = note_in_name(&name);
         Ok(s)
@@ -184,6 +190,86 @@ impl Sample {
             hermite(x0.r, x1.r, x2.r, x3.r, t),
         )
     }
+}
+
+/// A forgiving WAV decoder: walks RIFF chunks, accepts any `fmt ` size >= 16 (PCM 8/16/24/32-bit,
+/// IEEE float 32/64, WAVE_FORMAT_EXTENSIBLE) and tolerates a truncated `data` chunk.
+/// Returns (sample rate, channels, interleaved samples in -1..1).
+pub fn decode_wav_lenient(d: &[u8]) -> Result<(u32, usize, Vec<f32>), String> {
+    if d.len() < 12 || &d[..4] != b"RIFF" || &d[8..12] != b"WAVE" {
+        return Err("not a RIFF/WAVE file".into());
+    }
+    let u16_at = |i: usize| u16::from_le_bytes([d[i], d[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes([d[i], d[i + 1], d[i + 2], d[i + 3]]);
+    let mut fmt: Option<(u16, usize, u32, u16)> = None;
+    let mut i = 12;
+    while i + 8 <= d.len() {
+        let id = &d[i..i + 4];
+        let size = u32_at(i + 4) as usize;
+        let body = i + 8;
+        if id == b"fmt " {
+            if size < 16 || body + 16 > d.len() {
+                return Err("bad fmt chunk".into());
+            }
+            let mut tag = u16_at(body);
+            let ch = u16_at(body + 2).max(1) as usize;
+            let sr = u32_at(body + 4);
+            let bits = u16_at(body + 14);
+            if tag == 0xFFFE && size >= 40 && body + 26 <= d.len() {
+                tag = u16_at(body + 24); // sub-format GUID starts with the real format tag
+            }
+            fmt = Some((tag, ch, sr, bits));
+        } else if id == b"data" {
+            let (tag, ch, sr, bits) = fmt.ok_or("data before fmt")?;
+            let end = (body + size).min(d.len());
+            let data = &d[body..end];
+            let out: Vec<f32> = match (tag, bits) {
+                (1, 8) => data.iter().map(|&b| (b as f32 - 128.0) / 128.0).collect(),
+                (1, 16) => data
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+                    .collect(),
+                (1, 24) => data
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|c| {
+                        (((c[0] as i32) << 8 | (c[1] as i32) << 16 | (c[2] as i32) << 24) >> 8)
+                            as f32
+                            / 8_388_608.0
+                    })
+                    .collect(),
+                (1, 32) => data
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| {
+                        i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64 as f32 / 2_147_483_648.0
+                    })
+                    .collect(),
+                (3, 32) => data
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect(),
+                (3, 64) => data
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|c| {
+                        f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]) as f32
+                    })
+                    .collect(),
+                _ => return Err(format!("unsupported WAV format {tag} / {bits}-bit")),
+            };
+            return Ok((sr, ch, out));
+        }
+        i = body + size + (size & 1);
+    }
+    Err("no data chunk".into())
 }
 
 #[inline]
@@ -469,6 +555,37 @@ pub fn piano_key(file_name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lenient_decoder_handles_20_byte_fmt() {
+        // 24-bit mono PCM with a 20-byte fmt chunk (cbSize=2 + 2 extra bytes), which hound rejects
+        let mut d: Vec<u8> = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        d.extend_from_slice(&20u32.to_le_bytes());
+        d.extend_from_slice(&1u16.to_le_bytes());
+        d.extend_from_slice(&1u16.to_le_bytes());
+        d.extend_from_slice(&44100u32.to_le_bytes());
+        d.extend_from_slice(&(44100u32 * 3).to_le_bytes());
+        d.extend_from_slice(&3u16.to_le_bytes());
+        d.extend_from_slice(&24u16.to_le_bytes());
+        d.extend_from_slice(&2u16.to_le_bytes());
+        d.extend_from_slice(&[0, 0]);
+        d.extend_from_slice(b"data");
+        d.extend_from_slice(&6u32.to_le_bytes());
+        d.extend_from_slice(&[0x00, 0x00, 0x40, 0x00, 0x00, 0xC0]); // +0.5, -0.5
+        let n = d.len() as u32 - 8;
+        d[4..8].copy_from_slice(&n.to_le_bytes());
+        let (sr, ch, x) = decode_wav_lenient(&d).unwrap();
+        assert_eq!((sr, ch), (44100, 1));
+        assert!(
+            (x[0] - 0.5).abs() < 1e-6 && (x[1] + 0.5).abs() < 1e-6,
+            "{x:?}"
+        );
+        let p = std::env::temp_dir().join(format!("uwu-fmt20-{}.wav", std::process::id()));
+        std::fs::write(&p, &d).unwrap();
+        let s = Sample::load_uncached(&p).unwrap();
+        assert_eq!(s.len(), 2);
+        let _ = std::fs::remove_file(&p);
+    }
 
     #[test]
     fn note_names() {

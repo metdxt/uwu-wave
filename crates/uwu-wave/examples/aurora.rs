@@ -39,12 +39,12 @@ fn main() {
     let vla = seat("violas", Orchestra::violas(), "violas", -8.db());
     let vc = seat("cellos", Orchestra::cellos(), "cellos", -9.db());
     let cb = seat("basses", Orchestra::basses(), "basses", -10.db());
-    let fl = seat("flute", Orchestra::flute(), "flute", -6.db()).gain(6.db());
-    let ob = seat("oboe", Orchestra::oboe(), "oboe", -6.db()).gain(9.db());
-    let cl = seat("clarinet", Orchestra::clarinet(), "clarinet", -6.db()).gain(12.db());
+    let fl = seat("flute", Orchestra::flute(), "flute", -6.db()).gain(7.db());
+    let ob = seat("oboe", Orchestra::oboe(), "oboe", -6.db()).gain(4.db());
+    let cl = seat("clarinet", Orchestra::clarinet(), "clarinet", -6.db()).gain(10.db());
     let bn = seat("bassoon", Orchestra::bassoon(), "bassoon", -9.db()).gain(1.db());
     let hn = seat("horns", Orchestra::horns(), "horns", -5.db()).gain(4.db());
-    let tpt = seat("trumpet", Orchestra::trumpet(), "trumpet", -6.db()).gain(4.db());
+    let tpt = seat("trumpet", Orchestra::trumpet(), "trumpet", -6.db()).gain(6.db());
     let tbn = seat("trombones", Orchestra::trombones(), "trombone", -6.db()).gain(4.db());
     let tba = seat("tuba", Orchestra::tuba(), "tuba", -7.db()).gain(5.db());
     let timp = seat("timpani", Orchestra::timpani(), "timpani", -6.db());

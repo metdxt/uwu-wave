@@ -1,6 +1,4 @@
 /target
+/assets/local/
 /out
 **/*.rs.bk
-# the sample library is 1.4 GB and partly non-redistributable (see assets/library/LICENSES.md);
-# rebuild it with `cargo run --release --bin uwu -- library build`
-/assets/library/

@@ -467,7 +467,14 @@ fn vpo_plan(preset: &str, g: usize) -> Option<Pick> {
             7 => Some(("brass/trumpet", "sustain", 0, Some("p"))),
             _ => None,
         },
-        "all-woodwinds-SEC-sustain" => simple("woodwinds/woodwinds-ensemble", "sustain"),
+        // SSO woodwind sections (the ensemble patch is emitted separately)
+        "all-woodwinds-SEC-sustain" => match g {
+            2 => Some(("woodwinds/bassoons", "sustain", 0, None)),
+            3 => Some(("woodwinds/clarinets", "sustain", 0, None)),
+            4 => Some(("woodwinds/oboes", "sustain", 0, None)),
+            5 => Some(("woodwinds/flutes", "sustain", 0, None)),
+            _ => None,
+        },
         "piccolo-SOLO-accent" => simple("woodwinds/piccolo", "accent"),
         "piccolo-SOLO-staccato" => simple("woodwinds/piccolo", "staccato"),
         "piccolo-SOLO-sustain" => simple("woodwinds/piccolo", "sustain"),
@@ -628,6 +635,7 @@ fn build_vpo(src: &Path, out: &Path, built: &Mutex<Vec<Built>>) -> Result<(), Er
         }
     }
     targets.push("brass/brass-ensemble/sustain".into());
+    targets.push("woodwinds/woodwinds-ensemble/sustain".into());
     targets.sort();
     targets.dedup();
     for t in &targets {
@@ -687,6 +695,18 @@ fn build_vpo(src: &Path, out: &Path, built: &Mutex<Vec<Built>>) -> Result<(), Er
                     &format!("{id}/{art}"),
                     layer,
                     dyn_,
+                    g,
+                )?;
+            }
+            if stem == "all-woodwinds-SEC-sustain" {
+                vpo_emit(
+                    src,
+                    out,
+                    &mut acc,
+                    root_db,
+                    "woodwinds/woodwinds-ensemble/sustain",
+                    i as u8,
+                    None,
                     g,
                 )?;
             }
@@ -938,7 +958,9 @@ fn convert(job: &Job) -> Result<(f32, Option<(u64, u64)>), Error> {
         w.write_sample(((v + d).clamp(-1.0, 1.0) * 32767.0).round() as i16)?;
     }
     w.finalize()?;
-    Ok((peak, lp))
+    // the level of what was kept (a phrase cut to its first note is quieter than the phrase)
+    let kept = y.iter().fold(0f32, |m, v| m.max(v.abs()));
+    Ok((kept, lp))
 }
 
 fn phil_inst(dir: &str) -> Option<(&'static str, bool)> {
@@ -958,6 +980,10 @@ fn phil_inst(dir: &str) -> Option<(&'static str, bool)> {
         "oboe" => ("woodwinds/oboe", false),
         "saxophone" => ("woodwinds/saxophone", false),
         "trombone" => ("brass/trombone", false),
+        "trumpet" => ("brass/trumpet", false),
+        "tuba" => ("brass/tuba", false),
+        "violin" => ("strings/violin", false),
+        "viola" => ("strings/viola", false),
         _ => return None,
     })
 }
@@ -1213,11 +1239,12 @@ fn build_phil(src: &Path, out: &Path, jobs: usize, built: &Mutex<Vec<Built>>) ->
             }
         }
         for (mut z, job) in items {
-            let Some((_, lp)) = results.get(&job.dst) else {
+            let Some((own, lp)) = results.get(&job.dst) else {
                 continue;
             };
-            // level each dynamic layer: loudest sample of the layer peaks at a target that
-            // keeps a musical (but not extreme) pp..ff spread
+            // level every sample: it peaks at its dynamic's target, which keeps a musical (but
+            // not extreme) pp..ff spread and evens out quiet/loud takes of the recordings.
+            // Boosts are limited to +12 dB over the layer's loudest sample.
             let target = match z.dynamic.as_deref() {
                 Some("pp") => -16.0,
                 Some("p") => -12.0,
@@ -1226,11 +1253,13 @@ fn build_phil(src: &Path, out: &Path, jobs: usize, built: &Mutex<Vec<Built>>) ->
                 Some("f") => -4.0,
                 _ => -2.5,
             };
-            let lp_peak = peaks
+            let layer_peak = peaks
                 .get(&z.dynamic.clone().unwrap_or_default())
                 .copied()
                 .unwrap_or(1.0);
-            z.gain_db = ((target - crate::units::gain_to_db(lp_peak)) * 10.0).round() / 10.0;
+            let own_db = crate::units::gain_to_db(own.max(1e-4))
+                .max(crate::units::gain_to_db(layer_peak) - 12.0);
+            z.gain_db = ((target - own_db) * 10.0).round() / 10.0;
             if let Some((a, b)) = lp {
                 z.loop_start = Some(*a);
                 z.loop_end = Some(*b);
@@ -1603,8 +1632,34 @@ names its source. Keep this file with the library.
 <https://github.com/eodowd/VirtualPlayingOrchestra>, compiled by Paul Battersby
 (<http://virtualplaying.com/virtual-playing-orchestra/>). Used for: the string sections
 (`violins-1`, `violins-2`, `violas`, `cellos`, `basses`, `strings-ensemble`), `violin-solo`,
-`viola-solo`, `brass/{horns,trombones,trumpet,tuba,brass-ensemble}`, `woodwinds/piccolo`,
-`woodwinds/woodwinds-ensemble`, `choir/*`, `plucked/harp`, `percussion/{celesta,glockenspielThe 88-key piano recordings from the original `assets/piano` folder. Check the original source
+`viola-solo`, `brass/{horns,trombones,trumpet,tuba,brass-ensemble}`,
+`woodwinds/{flutes,oboes,clarinets,bassoons,piccolo,woodwinds-ensemble}`, `choir/*`,
+`plucked/harp`, `percussion/{celesta,glockenspiel,xylophone,vibraphone,tubular-bells,timpani}` and
+the impulse responses in `ir/`. It combines:
+
+- Sonatina Symphonic Orchestra <http://sso.mattiaswestlund.net/> — Creative Commons Sampling Plus 1.0.
+- Mattias Westlund additional samples <http://mattiaswestlund.net/samples/> — CC BY-SA 3.0 Unported.
+- No Budget Orchestra <https://github.com/ssj71/No-Budget-Orchestra> — CC BY-SA 4.0.
+- VSCO 2 Community Edition <http://vis.versilstudios.net/vsco-2.html> — CC0 1.0.
+- University of Iowa Electronic Music Studios <http://theremin.music.uiowa.edu/> — "these
+  recordings have been freely available on this website and may be downloaded and used for any
+  projects, without restrictions".
+- stamperadam <https://freesound.org/people/stamperadam/> — CC0.
+- A few Philharmonia Orchestra samples, modified by the VPO author (see its README).
+
+The authors of these sources are aware of their use in Virtual Playing Orchestra (see its README).
+
+## Philharmonia Orchestra sound samples — NOT bundled
+<https://philharmonia.co.uk/resources/sound-samples/>. Their licence says the samples "must not be
+sold or made available 'as is' (i.e. as samples or as a sampler instrument)", so this library does
+not contain them. Download the official archives yourself and run
+`uwu library import philharmonia`. The converted instruments (solo violin, viola, cello, double
+bass, woodwinds, horn, trumpet, trombone, tuba, guitar, mandolin, banjo and percussion) go to the
+git-ignored overlay `assets/local/`, which takes precedence over this folder. Never commit or share
+that folder.
+
+## Piano (`keys/piano`)
+The 88-key piano recordings from the original `assets/piano` folder. Check the original source
 before redistributing the raw samples.
 
 ## cluesurf/wave (`plucked/{bass-guitar,electric-guitar,electric-guitar-fly,celtic-harp,zither}`, `drums/*`, `sfx/*`)
@@ -1625,10 +1680,10 @@ pub fn build(opts: &BuildOptions) -> Result<Vec<Built>, Error> {
         eprintln!("▸ Virtual Playing Orchestra");
         build_vpo(&vpo, &opts.out, &built)?;
     }
-    let phil = s.join("philharmonia-samples-gh-pages");
-    if want("phil") && phil.is_dir() {
-        eprintln!("▸ Philharmonia (ffmpeg × {})", opts.jobs);
-        build_phil(&phil, &opts.out, opts.jobs, &built)?;
+    if want("phil") {
+        eprintln!(
+            "note: Philharmonia samples are no longer part of the bundled library; run `uwu library import philharmonia`"
+        );
     }
     if want("piano") && s.join("piano").is_dir() {
         eprintln!("▸ piano");
@@ -1647,6 +1702,308 @@ pub fn build(opts: &BuildOptions) -> Result<Vec<Built>, Error> {
     );
     Ok(built.into_inner().unwrap())
 }
+
+// ---------------------------------------------------------------------------------------------
+// importer: official Philharmonia archives → local overlay
+
+/// Where to get the Philharmonia samples.
+pub const PHILHARMONIA_URL: &str = "https://philharmonia.co.uk/resources/sound-samples/";
+
+/// Archive names the official download uses.
+pub const PHILHARMONIA_ARCHIVES: [&str; 5] = [
+    "all-samples.zip",
+    "Brass.zip",
+    "Strings.zip",
+    "Woodwind.zip",
+    "Percussion.zip",
+];
+
+/// Importer options.
+#[derive(Clone, Debug)]
+pub struct ImportOptions {
+    /// Archives (`.zip`, nested zips allowed) and/or extracted folders.
+    pub inputs: Vec<PathBuf>,
+    /// Overlay root to write (default `<assets>/local`).
+    pub out: PathBuf,
+    /// Parallel ffmpeg jobs.
+    pub jobs: usize,
+}
+
+/// What an import produced.
+#[derive(Clone, Debug, Default)]
+pub struct ImportSummary {
+    pub mp3s: usize,
+    pub duplicates: usize,
+    pub instruments: Vec<String>,
+    pub patches: usize,
+    pub bytes: u64,
+    pub unknown: Vec<String>,
+}
+
+/// Look for the official archives next to the repo, in its parent folder and in ~/Downloads.
+pub fn find_philharmonia_archives() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = vec![];
+    if let Ok(c) = std::env::current_dir() {
+        dirs.push(c.clone());
+        if let Some(p) = c.parent() {
+            dirs.push(p.to_path_buf());
+        }
+    }
+    if let Some(a) = super::load::assets_dir()
+        && let Some(repo) = a.parent()
+    {
+        dirs.push(repo.to_path_buf());
+        if let Some(p) = repo.parent() {
+            dirs.push(p.to_path_buf());
+        }
+    }
+    if let Some(h) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(h).join("Downloads"));
+    }
+    let mut found: Vec<PathBuf> = vec![];
+    for d in dirs {
+        for n in PHILHARMONIA_ARCHIVES {
+            let p = d.join(n);
+            if p.is_file() {
+                let c = std::fs::canonicalize(&p).unwrap_or(p);
+                if !found.contains(&c) {
+                    found.push(c);
+                }
+            }
+        }
+    }
+    found
+}
+
+fn is_junk(p: &Path) -> bool {
+    p.components().any(|c| c.as_os_str() == "__MACOSX")
+        || p.file_name()
+            .map(|n| n.to_string_lossy().starts_with("._"))
+            .unwrap_or(false)
+}
+
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    v.sort();
+    for p in v {
+        if is_junk(&p) {
+            continue;
+        }
+        if p.is_dir() {
+            walk_files(&p, out);
+        } else {
+            out.push(p);
+        }
+    }
+}
+
+fn unzip_into(zip: &Path, dest: &Path) -> Result<(), Error> {
+    std::fs::create_dir_all(dest)?;
+    let o = std::process::Command::new("unzip")
+        .args(["-qq", "-o"])
+        .arg(zip)
+        .args(["-x", "__MACOSX/*", "*/__MACOSX/*", "._*", "*/._*", "-d"])
+        .arg(dest)
+        .output()
+        .map_err(|e| Error::Other(format!("could not run unzip (is it installed?): {e}")))?;
+    // exit 11 = an exclude pattern matched nothing, which is fine
+    if !o.status.success() && o.status.code() != Some(11) {
+        return Err(Error::Other(format!(
+            "unzip failed on {} ({}): {}",
+            zip.display(),
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Collect every `.mp3` from archives/folders: zips (including zips inside zips) are extracted
+/// into `tmp`, macOS junk is skipped and duplicates (same file name) are dropped.
+/// Returns (file name → path, number of duplicates).
+pub fn collect_mp3s(
+    inputs: &[PathBuf],
+    tmp: &Path,
+) -> Result<(BTreeMap<String, PathBuf>, usize), Error> {
+    let mut files: Vec<PathBuf> = vec![];
+    let mut queue: Vec<PathBuf> = vec![];
+    for i in inputs {
+        if i.is_dir() {
+            walk_files(i, &mut files);
+        } else if i.is_file() {
+            files.push(i.clone());
+        } else {
+            return Err(Error::Invalid(format!(
+                "{}: no such file or folder",
+                i.display()
+            )));
+        }
+    }
+    let mut n = 0;
+    let mut map: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut dups = 0;
+    loop {
+        for f in files.drain(..) {
+            let name = f
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let low = name.to_ascii_lowercase();
+            if is_junk(&f) {
+                continue;
+            }
+            if low.ends_with(".zip") {
+                queue.push(f);
+            } else if low.ends_with(".mp3") {
+                if let std::collections::btree_map::Entry::Vacant(e) = map.entry(name) {
+                    e.insert(f);
+                } else {
+                    dups += 1;
+                }
+            }
+        }
+        let Some(z) = queue.pop() else { break };
+        n += 1;
+        let dest = tmp.join(format!("x{n}"));
+        eprint!(
+            "\r  unzip {}\x1b[K",
+            z.file_name().unwrap_or_default().to_string_lossy()
+        );
+        unzip_into(&z, &dest)?;
+        walk_files(&dest, &mut files);
+    }
+    eprintln!();
+    Ok((map, dups))
+}
+
+/// Philharmonia file-name prefix → the instrument folder name the converter knows.
+fn phil_prefix_dir(prefix: &str) -> String {
+    match prefix {
+        "english-horn" | "cor-anglais" => "cor anglais".into(),
+        "french-horn" => "french horn".into(),
+        "bass-clarinet" => "bass clarinet".into(),
+        "double-bass" => "double bass".into(),
+        p => p.to_string(),
+    }
+}
+
+/// Import the official Philharmonia archives into the local overlay (idempotent: instruments
+/// it produces are replaced, other overlay content is kept).
+pub fn import_philharmonia(opts: &ImportOptions) -> Result<ImportSummary, Error> {
+    let tmp = lfs::cache_dir().join(format!("import-{}", std::process::id()));
+    fresh_dir(&tmp)?;
+    let res = (|| {
+        let (mp3s, duplicates) = collect_mp3s(&opts.inputs, &tmp)?;
+        if mp3s.is_empty() {
+            return Err(Error::Invalid(format!(
+                "no Philharmonia .mp3 files found in {:?}",
+                opts.inputs
+            )));
+        }
+        // stage as <tmp>/stage/audio/<instrument>/ (+ percussion/<instrument>/) via symlinks
+        let audio = tmp.join("stage").join("audio");
+        let mut ids: Vec<String> = vec![];
+        let mut unknown: Vec<String> = vec![];
+        for (name, path) in &mp3s {
+            let stem = name.trim_end_matches(".mp3");
+            let t: Vec<&str> = stem.split('_').collect();
+            if t.len() < 5 {
+                continue;
+            }
+            let dir = if t[1].is_empty() {
+                let d = audio.join("percussion").join(t[0]);
+                let id = format!("percussion/{}", clean_name(&t[0].to_ascii_lowercase()));
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+                d
+            } else {
+                let d = phil_prefix_dir(t[0]);
+                match phil_inst(&d) {
+                    Some((id, _)) => {
+                        if !ids.contains(&id.to_string()) {
+                            ids.push(id.to_string());
+                        }
+                    }
+                    None => {
+                        if !unknown.contains(&t[0].to_string()) {
+                            unknown.push(t[0].to_string());
+                        }
+                        continue;
+                    }
+                }
+                audio.join(d)
+            };
+            std::fs::create_dir_all(&dir)?;
+            let dst = dir.join(name);
+            if !dst.exists() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(path, &dst)?;
+                #[cfg(not(unix))]
+                std::fs::copy(path, &dst)?;
+            }
+        }
+        ids.sort();
+        // replace whole instruments in the overlay
+        std::fs::create_dir_all(&opts.out)?;
+        for id in &ids {
+            let d = opts.out.join(id);
+            if d.exists() {
+                std::fs::remove_dir_all(&d)?;
+            }
+        }
+        let built = Mutex::new(vec![]);
+        eprintln!(
+            "▸ converting {} mp3s for {} instruments (ffmpeg × {})",
+            mp3s.len(),
+            ids.len(),
+            opts.jobs
+        );
+        build_phil(&tmp.join("stage"), &opts.out, opts.jobs, &built)?;
+        let built = built.into_inner().unwrap();
+        let bytes = ids.iter().map(|id| dir_size(&opts.out.join(id))).sum();
+        std::fs::write(opts.out.join("LICENSES.md"), LOCAL_LICENSE)?;
+        reindex(&opts.out)?;
+        Ok(ImportSummary {
+            mp3s: mp3s.len(),
+            duplicates,
+            instruments: ids,
+            patches: built.len(),
+            bytes,
+            unknown,
+        })
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    res
+}
+
+fn dir_size(d: &Path) -> u64 {
+    let mut v = vec![];
+    walk_files(d, &mut v);
+    v.iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+const LOCAL_LICENSE: &str = r#"# Local sample overlay — NOT for redistribution
+
+This folder (`assets/local/`, git-ignored) holds sample libraries imported on this machine with
+`uwu library import …`. Instruments here replace instruments of the same id in
+`assets/library/`.
+
+## Philharmonia Orchestra sound samples
+<https://philharmonia.co.uk/resources/sound-samples/> — converted from the official MP3 archives.
+
+> "You are free to use these samples as you wish, including releasing them as part of a
+> commercial work. The only restriction is that they must not be sold or made available 'as is'
+> (i.e. as samples or as a sampler instrument)."
+
+Use them in your music; do not commit, upload or share this folder.
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -1667,6 +2024,71 @@ mod tests {
     <group enabled="false"><sample path='single.wav' rootNote='60'/></group>
   </groups>
 </DecentSampler>"#;
+
+    #[test]
+    fn importer_collects_nested_zips_and_dedupes() {
+        let has = |c: &str| std::process::Command::new(c).arg("-v").output().is_ok();
+        if !has("zip") || !has("unzip") {
+            eprintln!("zip/unzip not installed, skipping");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("uwu-import-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src/Brass/tuba");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(root.join("src/__MACOSX/Brass")).unwrap();
+        for n in ["tuba_A1_05_forte_normal.mp3", "tuba_C2_05_piano_normal.mp3"] {
+            std::fs::write(src.join(n), b"fake").unwrap();
+        }
+        std::fs::write(
+            root.join("src/__MACOSX/Brass/._tuba_A1_05_forte_normal.mp3"),
+            b"junk",
+        )
+        .unwrap();
+        let run = |dir: &Path, args: &[&str]| {
+            let st = std::process::Command::new("zip")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                st.status.success(),
+                "{}",
+                String::from_utf8_lossy(&st.stderr)
+            );
+        };
+        // nested: Brass/tuba/tuba.zip holds the same mp3s again
+        run(
+            &src,
+            &[
+                "-q",
+                "tuba.zip",
+                "tuba_A1_05_forte_normal.mp3",
+                "tuba_C2_05_piano_normal.mp3",
+            ],
+        );
+        run(
+            &root.join("src"),
+            &["-q", "-r", "../Brass.zip", "Brass", "__MACOSX"],
+        );
+        let tmp = root.join("tmp");
+        let (m, dups) = collect_mp3s(&[root.join("Brass.zip")], &tmp).unwrap();
+        assert_eq!(
+            m.keys().cloned().collect::<Vec<_>>(),
+            vec!["tuba_A1_05_forte_normal.mp3", "tuba_C2_05_piano_normal.mp3"]
+        );
+        assert_eq!(dups, 2);
+        assert!(
+            m.values()
+                .all(|p| !p.to_string_lossy().contains("__MACOSX"))
+        );
+        // folders work too
+        let (m2, _) = collect_mp3s(&[root.join("src")], &root.join("tmp2")).unwrap();
+        assert_eq!(m2.len(), 2);
+        assert_eq!(phil_prefix_dir("english-horn"), "cor anglais");
+        assert_eq!(phil_inst("violin"), Some(("strings/violin", false)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn dspreset_parser() {

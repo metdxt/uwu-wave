@@ -486,7 +486,7 @@ impl Articulated {
     }
 
     fn is_oneshot(&self, pi: usize) -> bool {
-        self.oneshot_all || self.patches[pi].0.is_short()
+        self.oneshot_all || self.patches[pi].0.is_short() || self.patches[pi].2.oneshot
     }
 
     fn alloc(&mut self) -> usize {
@@ -555,11 +555,12 @@ impl Articulated {
                 if h >= MAX_HEADS {
                     break;
                 }
-                let s = &patch.zones[z].sample;
-                let mut p = s.onset() as f64;
+                let zn = &patch.zones[z];
+                let s = &zn.sample;
+                let mut p = if zn.start > 0 { zn.start } else { s.onset() } as f64;
                 if legato_from.is_some() {
                     p += (self.legato_skip * s.sr) as f64;
-                    p = p.min(s.frames.len() as f64 * 0.5);
+                    p = p.min(zn.start as f64 + (zn.end - zn.start) as f64 * 0.5);
                 }
                 v.zone[h] = z;
                 v.hc[h] = c;
@@ -741,7 +742,7 @@ impl Articulated {
                     let s = &zone.sample;
                     let rate =
                         ((semis - zone.root + zone.tune) / 12.0).exp2() as f64 * (s.sr / sr) as f64;
-                    let len = s.frames.len() as f64;
+                    let len = zone.end as f64;
                     if wl > 1e-4 {
                         acc += s.hermite(v.pos[hd]) * (wl * zone.gain);
                     }

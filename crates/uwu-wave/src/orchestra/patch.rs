@@ -1,7 +1,7 @@
 //! Articulation patches: key/velocity-mapped sample zones loaded from the sound library
 //! (`assets/library/<family>/<instrument>/<articulation>/zones.txt`) or built in code.
 
-use crate::sample::{Sample, assets_dir, parse_note};
+use crate::sample::Sample;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -28,14 +28,22 @@ pub struct ArticZone {
     /// Stack: zones of different stacks sound *together* (e.g. a patch layering two sample
     /// sets). A stack > 0 only plays where one of its zones covers the key.
     pub stack: u32,
+    /// Playback start frame (`0` = the sample's detected onset).
+    pub start: usize,
+    /// Playback end frame (exclusive).
+    pub end: usize,
     pub(crate) layer: usize,
 }
 
 impl ArticZone {
     /// A zone covering just its root key and the full dynamic range.
     pub fn new(sample: impl Into<Arc<Sample>>, root: f32) -> ArticZone {
+        let sample: Arc<Sample> = sample.into();
+        let end = sample.frames.len();
         ArticZone {
-            sample: sample.into(),
+            start: 0,
+            end,
+            sample,
             root,
             lo: root,
             hi: root,
@@ -95,6 +103,8 @@ pub struct ArticPatch {
     pub gain: f32,
     /// Patch tuning (semitones).
     pub tune: f32,
+    /// Notes ignore note-off (percussion manifests set `@oneshot=1`).
+    pub oneshot: bool,
     /// Loudness normalization factor (computed by [`ArticPatch::finish`]).
     pub norm: f32,
     /// Distinct dynamic layers, sorted soft → loud, as (vlo, vhi).
@@ -111,6 +121,7 @@ impl ArticPatch {
             gain: 1.0,
             tune: 0.0,
             norm: 1.0,
+            oneshot: false,
             layers: vec![(0.0, 1.0)],
         }
     }
@@ -179,8 +190,8 @@ impl ArticPatch {
         let (mut acc, mut n) = (0.0f64, 0usize);
         for z in zs.iter().step_by(step) {
             let s = &z.sample;
-            let a = s.onset();
-            let b = (a + (0.8 * s.sr) as usize).min(s.frames.len());
+            let a = if z.start > 0 { z.start } else { s.onset() };
+            let b = (a + (0.8 * s.sr) as usize).min(z.end);
             if b <= a {
                 continue;
             }
@@ -389,26 +400,55 @@ impl ArticPatch {
     }
 }
 
-/// `assets/library`.
+/// Library roots searched for instruments, highest priority first (the sample library's
+/// roots: `$UWU_LIBRARY` entries, else the git-ignored `<assets>/local` overlay, then the
+/// redistributable `<assets>/library`).
+pub fn library_roots() -> Vec<PathBuf> {
+    crate::sample::library::library_roots()
+}
+
+/// The base (last) library root, for messages.
 pub fn library_root() -> PathBuf {
-    assets_dir()
-        .map(|a| a.join("library"))
+    library_roots()
+        .pop()
         .unwrap_or_else(|| PathBuf::from("assets/library"))
+}
+
+fn has_artics(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().any(|e| e.path().join("zones.txt").is_file()))
+        .unwrap_or(false)
+}
+
+/// Where an instrument (`"family/inst"`) lives: the first root that has it (an overlay shadows
+/// the whole instrument), plus that root's index (0 = highest priority).
+pub fn instrument_location(instrument: &str) -> Option<(PathBuf, usize)> {
+    let p = Path::new(instrument);
+    if p.is_absolute() && has_artics(p) {
+        return Some((p.to_path_buf(), 0));
+    }
+    library_roots()
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| (r.join(instrument), i))
+        .find(|(d, _)| has_artics(d))
 }
 
 fn resolve_dir(id: &str) -> Option<PathBuf> {
     let p = Path::new(id);
-    [p.to_path_buf(), library_root().join(id)]
-        .into_iter()
-        .find(|c| c.join("zones.txt").is_file())
+    if p.join("zones.txt").is_file() {
+        return Some(p.to_path_buf());
+    }
+    let (inst, artic) = id.rsplit_once('/')?;
+    let (d, _) = instrument_location(inst)?;
+    let d = d.join(artic);
+    d.join("zones.txt").is_file().then_some(d)
 }
 
 /// Articulation sub-directories (with a `zones.txt`) of a library instrument.
 pub fn instrument_dirs(instrument: &str) -> Vec<(String, PathBuf)> {
-    let base = if Path::new(instrument).is_dir() {
-        PathBuf::from(instrument)
-    } else {
-        library_root().join(instrument)
+    let Some((base, _)) = instrument_location(instrument) else {
+        return vec![];
     };
     let mut v = vec![];
     if let Ok(rd) = std::fs::read_dir(&base) {
@@ -421,10 +461,6 @@ pub fn instrument_dirs(instrument: &str) -> Vec<(String, PathBuf)> {
     }
     v.sort();
     v
-}
-
-fn num(v: &str) -> Option<f32> {
-    v.parse::<f32>().ok().or_else(|| parse_note(v))
 }
 
 fn dyn_label(v: &str) -> Option<(f32, f32)> {
@@ -441,96 +477,61 @@ fn dyn_label(v: &str) -> Option<(f32, f32)> {
     })
 }
 
-/// Parse a `zones.txt` articulation directory.
+/// Parse a `zones.txt` articulation directory (the library manifest format, see
+/// [`crate::sample::library::Manifest`]). Remote zones are downloaded on first load.
 pub fn load_dir(dir: &Path, name: &str) -> Result<ArticPatch, String> {
+    use crate::sample::library::Manifest;
     let text = std::fs::read_to_string(dir.join("zones.txt"))
         .map_err(|e| format!("{}: {e}", dir.display()))?;
+    let m = Manifest::parse(&text).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let hnum = |k: &str| m.get(k).and_then(|v| v.parse::<f32>().ok());
     let mut p = ArticPatch::new(name);
-    let mut def_loop = false;
-    let mut def_gain = 1.0f32;
-    let mut def_tune = 0.0f32;
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('@') {
-            for tok in line.split_whitespace() {
-                let Some((k, v)) = tok.trim_start_matches('@').split_once('=') else {
-                    continue;
-                };
-                match k {
-                    "attack" => p.attack = v.parse().unwrap_or(p.attack),
-                    "release" => p.release = v.parse().unwrap_or(p.release),
-                    "gain_db" => def_gain = crate::units::db_to_gain(v.parse().unwrap_or(0.0)),
-                    "tune" => def_tune = v.parse().unwrap_or(0.0),
-                    "loop" => def_loop = v == "1" || v == "true",
-                    _ => {}
-                }
-            }
-            continue;
-        }
-        let mut file = None;
-        let (mut root, mut lo, mut hi, mut vlo, mut vhi) = (None, None, None, 0.0f32, 1.0f32);
-        let (mut gain, mut tune, mut rr) = (def_gain, def_tune, 0u32);
-        let (mut ls, mut le) = (None, None);
-        let mut has_v = false;
-        let mut dynl = None;
-        let mut stack = 0u32;
-        for tok in line.split_whitespace() {
-            let Some((k, v)) = tok.split_once('=') else {
+    p.attack = hnum("attack").unwrap_or(p.attack);
+    p.release = hnum("release").unwrap_or(p.release);
+    p.gain = crate::units::db_to_gain(hnum("gain_db").unwrap_or(0.0));
+    p.tune = hnum("tune").unwrap_or(0.0);
+    p.oneshot = m.get("oneshot").map(|v| v != "0").unwrap_or(false);
+    let loops = m.get("loop").map(|v| v != "0").unwrap_or(true);
+    // remote (download-on-first-use) one-shot folders can hold dozens of hits: fetch at most
+    // MAX_REMOTE of them so a fallback preset loads quickly
+    const MAX_REMOTE: usize = 8;
+    let mut remote = 0;
+    for spec in &m.zones {
+        if spec.url.is_some() && !dir.join(&spec.file).is_file() {
+            if remote >= MAX_REMOTE {
                 continue;
-            };
-            match k {
-                "file" => file = Some(v.to_string()),
-                "root" => root = num(v),
-                "lo" => lo = num(v),
-                "hi" => hi = num(v),
-                "vlo" => {
-                    vlo = v.parse().unwrap_or(0.0);
-                    has_v = true
-                }
-                "vhi" => {
-                    vhi = v.parse().unwrap_or(1.0);
-                    has_v = true
-                }
-                "gain_db" => gain = def_gain * crate::units::db_to_gain(v.parse().unwrap_or(0.0)),
-                "tune" => tune = def_tune + v.parse::<f32>().unwrap_or(0.0),
-                "rr" => rr = v.parse().unwrap_or(0),
-                "layer" => stack = v.parse().unwrap_or(0),
-                "dyn" => dynl = dyn_label(v),
-                "loop_start" => ls = v.parse::<usize>().ok(),
-                "loop_end" => le = v.parse::<usize>().ok(),
-                _ => {}
             }
+            remote += 1;
         }
-        if !has_v && let Some((a, b)) = dynl {
+        let zone = spec.to_zone(dir, loops);
+        let Some(sample) = zone.sample() else {
+            continue;
+        };
+        let sr = sample.sr;
+        let n = sample.frames.len();
+        let (mut vlo, mut vhi) = (spec.vlo.min(spec.vhi), spec.vlo.max(spec.vhi));
+        let explicit_v = spec.vlo != 0.0 || spec.vhi != 1.0;
+        if !explicit_v && let Some((a, b)) = spec.dynamic.as_deref().and_then(dyn_label) {
             vlo = a;
             vhi = b;
         }
-        let (Some(file), Some(root)) = (file, root) else {
-            continue;
-        };
-        let path = dir.join(&file);
-        if !path.is_file() {
-            continue; // remote (LFS) zone not fetched yet
-        }
-        let sample = match Sample::load(&path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let mut z = ArticZone::new(sample, root)
-            .keys(lo.unwrap_or(root), hi.unwrap_or(root))
+        let mut z = ArticZone::new(sample, spec.root)
+            .keys(spec.lo.unwrap_or(spec.root), spec.hi.unwrap_or(spec.root))
             .layer(vlo, vhi)
-            .gain(gain)
-            .rr(rr);
-        z.tune = tune;
-        z.stack = stack;
-        if let (Some(a), Some(b)) = (ls, le) {
-            z = z.looped(a, b);
-        } else if def_loop {
-            let n = z.sample.frames.len();
-            z = z.looped(n / 3, n.saturating_sub(n / 10));
+            .gain(crate::units::db_to_gain(spec.gain_db))
+            .rr(spec.rr)
+            .stacked(spec.layer as u32);
+        z.tune = spec.tune;
+        z.start = ((zone.region.start.max(0.0) * sr) as usize).min(n);
+        z.end = zone
+            .region
+            .end
+            .map(|e| ((e * sr) as usize).min(n))
+            .unwrap_or(n)
+            .max(z.start);
+        if let Some((a, b)) = zone.region.looped {
+            let end = z.end;
+            z = z.looped((a * sr) as usize, ((b * sr) as usize).min(end));
         }
         p.zones.push(z);
     }

@@ -39,7 +39,9 @@ usage: uwu <command> [args]
   live <name> [args...]      play and restart on every save of examples/<name>.rs or src/
   library build [--sources DIR] [--out DIR] [--only vpo,phil,piano,wavebase] [--jobs N]
                              (re)build assets/library from the source mirrors
-  library list [filter]      list instruments and articulations
+  library import philharmonia [ARCHIVE|DIR...] [--out DIR] [--jobs N]
+                             convert the official Philharmonia downloads into assets/local
+  library list [filter]      list instruments and articulations ([local] = overlay)
   library info <id>          zones, range and dynamics of a patch
   library index              regenerate assets/library/INDEX.md
 
@@ -50,6 +52,25 @@ environment: UWU_CRATE=<path to crates/uwu-wave> to use another checkout";
         use uwu_wave::sample::build::{self, BuildOptions};
         use uwu_wave::sample::library::{Library, library_dir};
         let sub = args.first().map(String::as_str).unwrap_or("list");
+        if args.iter().any(|a| a == "-h" || a == "--help") {
+            println!("{USAGE}");
+            return;
+        }
+        if sub == "build" {
+            // reject typos instead of silently rebuilding the whole library with defaults
+            let known = ["--sources", "--out", "--only", "--jobs"];
+            let mut i = 1;
+            while i < args.len() {
+                if !known.contains(&args[i].as_str()) {
+                    die(format!(
+                        "unknown option {:?} for `uwu library build` (expected {})",
+                        args[i],
+                        known.join(", ")
+                    ));
+                }
+                i += 2;
+            }
+        }
         let flag = |name: &str| {
             args.iter()
                 .position(|a| a == name)
@@ -89,10 +110,87 @@ library: {}",
                     die(e);
                 }
             }
-            "index" => match build::reindex(&default_out()) {
-                Ok(n) => println!("✓ INDEX.md: {n} patches"),
-                Err(e) => die(e),
-            },
+            "index" => {
+                let mut roots = vec![default_out()];
+                if let Some(l) = uwu_wave::sample::library::local_dir().filter(|d| d.is_dir()) {
+                    roots.push(l);
+                }
+                for r in roots {
+                    match build::reindex(&r) {
+                        Ok(n) => println!("✓ {}/INDEX.md: {n} patches", r.display()),
+                        Err(e) => die(e),
+                    }
+                }
+            }
+            "import" => {
+                let what = args.get(1).map(String::as_str).unwrap_or("");
+                if what != "philharmonia" {
+                    die(
+                        "usage: uwu library import philharmonia [ARCHIVE|DIR...] [--out DIR] [--jobs N]",
+                    );
+                }
+                let mut inputs: Vec<PathBuf> = vec![];
+                let mut i = 2;
+                while i < args.len() {
+                    match args[i].as_str() {
+                        "--out" | "--jobs" => i += 2,
+                        a => {
+                            inputs.push(PathBuf::from(a));
+                            i += 1;
+                        }
+                    }
+                }
+                if inputs.is_empty() {
+                    inputs = build::find_philharmonia_archives();
+                    if inputs.is_empty() {
+                        eprintln!(
+                            "No Philharmonia archives found.\n\n1. Download the samples (free) from {}\n   (e.g. all-samples.zip, or Brass.zip / Strings.zip / Woodwind.zip / Percussion.zip)\n2. Put the zips next to this repo, in its parent folder or in ~/Downloads — or pass their paths:\n   uwu library import philharmonia ~/Downloads/all-samples.zip",
+                            build::PHILHARMONIA_URL
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                let out = flag("--out").map(PathBuf::from).unwrap_or_else(|| {
+                    uwu_wave::sample::library::local_dir()
+                        .unwrap_or_else(|| PathBuf::from("assets/local"))
+                });
+                let jobs = flag("--jobs")
+                    .and_then(|j| j.parse().ok())
+                    .unwrap_or_else(|| {
+                        std::thread::available_parallelism()
+                            .map(|n| n.get())
+                            .unwrap_or(4)
+                    });
+                eprintln!("importing Philharmonia from:");
+                for i in &inputs {
+                    eprintln!("  {}", i.display());
+                }
+                eprintln!("into {}", out.display());
+                let t0 = std::time::Instant::now();
+                match build::import_philharmonia(&build::ImportOptions {
+                    inputs,
+                    out: out.clone(),
+                    jobs,
+                }) {
+                    Ok(s) => {
+                        println!(
+                            "✓ imported {} instruments, {} patches, {:.0} MB from {} mp3s ({} duplicates skipped) in {:.0}s → {}",
+                            s.instruments.len(),
+                            s.patches,
+                            s.bytes as f64 / 1e6,
+                            s.mp3s,
+                            s.duplicates,
+                            t0.elapsed().as_secs_f32(),
+                            out.display()
+                        );
+                        println!("  {}", s.instruments.join(" "));
+                        if !s.unknown.is_empty() {
+                            println!("  skipped unknown instruments: {}", s.unknown.join(", "));
+                        }
+                    }
+                    Err(e) => die(e),
+                }
+            }
             "info" => {
                 let id = args.get(1).unwrap_or_else(|| {
                     die("usage: uwu library info <family/instrument[/articulation]>")
@@ -112,6 +210,14 @@ library: {}",
                     p.release
                 );
                 println!("dir: {}", p.dir.display());
+                if let Ok(lib) = Library::open() {
+                    let roots: Vec<String> = lib
+                        .roots()
+                        .iter()
+                        .map(|r| r.display().to_string())
+                        .collect();
+                    println!("roots: {}", roots.join("  >  "));
+                }
             }
             "list" | "ls" => {
                 let lib = Library::open().unwrap_or_else(|e| die(e));
@@ -121,12 +227,13 @@ library: {}",
                     .into_iter()
                     .filter(|i| i.contains(&filter))
                 {
-                    println!("{id:<40} {}", lib.articulations(&id).join(" "));
+                    let mark = if lib.is_local(&id) { "[local]" } else { "" };
+                    println!("{id:<34} {mark:<8} {}", lib.articulations(&id).join(" "));
                 }
                 println!("ir: {}", lib.irs().join(" "));
             }
             other => die(format!(
-                "unknown library command {other:?} (build, list, info, index)"
+                "unknown library command {other:?} (build, import, list, info, index)"
             )),
         }
     }
